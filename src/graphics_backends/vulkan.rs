@@ -870,7 +870,7 @@ fn get_colorspace_corrected_format(format: vk::Format, color_space: vr::EColorSp
                 format
             }
         },
-        vr::EColorSpace::Linear => todo!("Linear colorspace not implemented yet"),
+        vr::EColorSpace::Linear => format,
     }
 }
 
@@ -908,5 +908,24 @@ fn new_entry() -> ash::Entry {
         ash::Entry::from_static_fn(ash::StaticFn {
             get_instance_proc_addr: fakexr::vulkan::get_instance_proc_addr,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linear_color_space_keeps_format() {
+        for format in [
+            vk::Format::R8G8B8A8_UNORM,
+            vk::Format::B8G8R8A8_SRGB,
+            vk::Format::R16G16B16A16_SFLOAT,
+        ] {
+            assert_eq!(
+                get_colorspace_corrected_format(format, vr::EColorSpace::Linear),
+                format
+            );
+        }
     }
 }
