@@ -701,13 +701,56 @@ impl vr::IVRCompositor029_Interface for Compositor {
     }
     fn SubmitWithArrayIndex(
         &self,
-        _eEye: vr::EVREye,
-        _pTexture: *const vr::Texture_t,
-        _unTextureArrayIndex: u32,
-        _pBounds: *const vr::VRTextureBounds_t,
-        _nSubmitFlags: vr::EVRSubmitFlags,
+        eEye: vr::EVREye,
+        pTexture: *const vr::Texture_t,
+        unTextureArrayIndex: u32,
+        pBounds: *const vr::VRTextureBounds_t,
+        nSubmitFlags: vr::EVRSubmitFlags,
     ) -> vr::EVRCompositorError {
-        todo!()
+        let Some(texture) = (unsafe { pTexture.as_ref() }) else {
+            return vr::EVRCompositorError::InvalidTexture;
+        };
+
+        let has_array_data = (nSubmitFlags & vr::EVRSubmitFlags::VulkanTextureWithArrayData).0 > 0;
+        if texture.eType == vr::ETextureType::Vulkan && !has_array_data {
+            // The Vulkan backend reads the array layer from VRVulkanTextureArrayData_t, so wrap
+            // the plain texture data in one. The copy into the swapchain is recorded during
+            // Submit and does not keep the pointer, so a stack value is fine.
+            if texture.handle.is_null() {
+                return vr::EVRCompositorError::InvalidTexture;
+            }
+            let mut array_data = vr::VRVulkanTextureArrayData_t {
+                _base: unsafe { *texture.handle.cast::<vr::VRVulkanTextureData_t>() },
+                m_unArrayIndex: unTextureArrayIndex,
+                m_unArraySize: unTextureArrayIndex.saturating_add(1),
+            };
+            let array_texture = vr::Texture_t {
+                handle: (&raw mut array_data).cast(),
+                ..*texture
+            };
+            return <Self as vr::IVRCompositor029_Interface>::Submit(
+                self,
+                eEye,
+                &array_texture,
+                pBounds,
+                nSubmitFlags | vr::EVRSubmitFlags::VulkanTextureWithArrayData,
+            );
+        }
+
+        // Either the Vulkan texture data already carries its own array index, or this is a
+        // plain texture that can only be submitted as layer 0.
+        if texture.eType == vr::ETextureType::Vulkan || unTextureArrayIndex == 0 {
+            return <Self as vr::IVRCompositor029_Interface>::Submit(
+                self,
+                eEye,
+                pTexture,
+                pBounds,
+                nSubmitFlags,
+            );
+        }
+
+        crate::warn_unimplemented!("SubmitWithArrayIndex (non-Vulkan array)");
+        vr::EVRCompositorError::InvalidTexture
     }
 
     fn GetSubmitTexture(
@@ -1682,6 +1725,94 @@ mod tests {
         assert_eq!(f.submit(vr::EVREye::Left), AlreadySubmitted);
 
         assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+    }
+
+    #[test]
+    fn submit_with_array_index_null_texture() {
+        let f = Fixture::new();
+
+        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(
+            vr::IVRCompositor029_Interface::SubmitWithArrayIndex(
+                &*f.comp,
+                vr::EVREye::Left,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                vr::EVRSubmitFlags::Default,
+            ),
+            InvalidTexture
+        );
+    }
+
+    #[test]
+    fn submit_with_array_index_zero_is_plain_submit() {
+        let f = Fixture::new();
+
+        assert_eq!(f.wait_get_poses(), None);
+        let texture = FakeGraphicsData::texture(&f.vk);
+        for eye in [vr::EVREye::Left, vr::EVREye::Right] {
+            assert_eq!(
+                vr::IVRCompositor029_Interface::SubmitWithArrayIndex(
+                    &*f.comp,
+                    eye,
+                    &texture,
+                    0,
+                    std::ptr::null(),
+                    vr::EVRSubmitFlags::Default,
+                ),
+                None
+            );
+        }
+
+        // Both eyes must have reached Submit.
+        assert_eq!(f.submit(vr::EVREye::Left), AlreadySubmitted);
+        assert_eq!(f.submit(vr::EVREye::Right), AlreadySubmitted);
+    }
+
+    #[test]
+    fn submit_with_array_index_vulkan_null_handle() {
+        let f = Fixture::new();
+
+        assert_eq!(f.wait_get_poses(), None);
+        let texture = vr::Texture_t {
+            handle: std::ptr::null_mut(),
+            eType: vr::ETextureType::Vulkan,
+            eColorSpace: vr::EColorSpace::Auto,
+        };
+        assert_eq!(
+            vr::IVRCompositor029_Interface::SubmitWithArrayIndex(
+                &*f.comp,
+                vr::EVREye::Left,
+                &texture,
+                1,
+                std::ptr::null(),
+                vr::EVRSubmitFlags::Default,
+            ),
+            InvalidTexture
+        );
+    }
+
+    #[test]
+    fn submit_with_array_index_unsupported_non_vulkan_array() {
+        let f = Fixture::new();
+
+        assert_eq!(f.wait_get_poses(), None);
+        let texture = FakeGraphicsData::texture(&f.vk);
+        assert_eq!(
+            vr::IVRCompositor029_Interface::SubmitWithArrayIndex(
+                &*f.comp,
+                vr::EVREye::Left,
+                &texture,
+                1,
+                std::ptr::null(),
+                vr::EVRSubmitFlags::Default,
+            ),
+            InvalidTexture
+        );
+
+        // The rejected call must not count as a submit.
         assert_eq!(f.submit(vr::EVREye::Left), None);
     }
 
