@@ -193,7 +193,15 @@ impl OverlayMan {
                 continue;
             };
 
-            let SwapchainData { swapchain, .. } = swapchains.get(key).unwrap();
+            // The swapchains are per session, so after a session restart an overlay keeps its rect
+            // but has no swapchain until the app sets its texture again.
+            let Some(SwapchainData { swapchain, .. }) = swapchains.get(key) else {
+                crate::warn_once!(
+                    "Overlay {:?} has no swapchain in the current session, skipping it until its texture is set again",
+                    overlay.name
+                );
+                continue;
+            };
             let space = session.get_space_for_origin(
                 overlay
                     .transform
