@@ -1031,6 +1031,8 @@ struct FrameController<G: GraphicsBackend> {
     swapchain_data: Option<SwapchainData<G::Api>>,
     image_index: usize,
     image_acquired: bool,
+    /// Whether the last attempt to recreate the swapchain failed.
+    recreate_failed: bool,
     should_render: bool,
     app_suspend_render: bool,
     app_fade_grid: bool,
@@ -1040,12 +1042,15 @@ struct FrameController<G: GraphicsBackend> {
 }
 supported_backends_enum!(enum DynFrameController: FrameController);
 
+/// A newly created swapchain and the format that was originally requested for it.
+type NewSwapchain<G> = (xr::Swapchain<G>, <G as xr::Graphics>::Format);
+
 impl<G: GraphicsBackend> FrameController<G> {
     fn init_swapchain(
         session_data: &SessionData,
         create_info: &mut xr::SwapchainCreateInfo<G::Api>,
         backend: &mut G,
-    ) -> (xr::Swapchain<G::Api>, <G::Api as xr::Graphics>::Format)
+    ) -> Result<NewSwapchain<G::Api>, vr::EVRCompositorError>
     where
         for<'a> &'a openxr_data::GraphicalSession:
             TryInto<&'a openxr_data::Session<G::Api>, Error: std::fmt::Display>,
@@ -1061,19 +1066,21 @@ impl<G: GraphicsBackend> FrameController<G> {
         let initial_format = create_info.format;
         session_data.check_format::<G>(create_info);
 
-        let swapchain = session_data
-            .create_swapchain(create_info)
-            .unwrap_or_else(|err| {
-                panic!(
-                    "Failed to create swapchain: {err} (info: {:#?})",
-                    [
-                        ("create_flags", format!("{:?}", create_info.create_flags)),
-                        ("width", create_info.width.to_string()),
-                        ("height", create_info.height.to_string()),
-                        ("sample_count", create_info.sample_count.to_string())
-                    ]
-                )
-            });
+        let swapchain = session_data.create_swapchain(create_info).map_err(|err| {
+            // This is a failure of the runtime, which we can't fix, but the game shouldn't
+            // be aborted over it.
+            crate::warn_once!(
+                "Failed to create swapchain: {} (info: {:#?})",
+                err,
+                [
+                    ("create_flags", format!("{:?}", create_info.create_flags)),
+                    ("width", create_info.width.to_string()),
+                    ("height", create_info.height.to_string()),
+                    ("sample_count", create_info.sample_count.to_string())
+                ]
+            );
+            vr::EVRCompositorError::RequestFailed
+        })?;
 
         let images = swapchain
             .enumerate_images()
@@ -1085,7 +1092,7 @@ impl<G: GraphicsBackend> FrameController<G> {
             create_info.width, create_info.height, create_info.format
         );
 
-        (swapchain, initial_format)
+        Ok((swapchain, initial_format))
     }
 
     fn new(
@@ -1101,15 +1108,18 @@ impl<G: GraphicsBackend> FrameController<G> {
         <G::Api as xr::Graphics>::Format: PartialEq + std::fmt::Debug,
     {
         let swapchain_data = if let Some(mut info) = create_info {
-            is_valid_swapchain_info(&info).then(|| {
-                let (swapchain, initial_format) =
-                    Self::init_swapchain(session_data, &mut info, &mut backend);
-                SwapchainData {
-                    swapchain,
-                    info,
-                    initial_format,
-                }
-            })
+            is_valid_swapchain_info(&info)
+                .then(|| {
+                    // If this fails, the swapchain will be created again by the next Submit.
+                    let (swapchain, initial_format) =
+                        Self::init_swapchain(session_data, &mut info, &mut backend).ok()?;
+                    Some(SwapchainData {
+                        swapchain,
+                        info,
+                        initial_format,
+                    })
+                })
+                .flatten()
         } else {
             None
         };
@@ -1120,6 +1130,7 @@ impl<G: GraphicsBackend> FrameController<G> {
             swapchain_data,
             image_index: 0,
             image_acquired: false,
+            recreate_failed: false,
             should_render: false,
             app_suspend_render: false,
             app_fade_grid: false,
@@ -1133,33 +1144,42 @@ impl<G: GraphicsBackend> FrameController<G> {
         &mut self,
         session_data: &SessionData,
         mut create_info: xr::SwapchainCreateInfo<G::Api>,
-    ) where
+    ) -> Result<(), vr::EVRCompositorError>
+    where
         for<'a> &'a openxr_data::GraphicalSession:
             TryInto<&'a openxr_data::Session<G::Api>, Error: std::fmt::Display>,
         <G::Api as xr::Graphics>::Format: PartialEq + std::fmt::Debug,
     {
         let (swapchain, initial_format) =
-            Self::init_swapchain(session_data, &mut create_info, &mut self.backend);
+            Self::init_swapchain(session_data, &mut create_info, &mut self.backend)?;
 
         self.swapchain_data = Some(SwapchainData {
             swapchain,
             info: create_info,
             initial_format,
         });
-        self.acquire_swapchain_image();
+        self.acquire_swapchain_image()?;
         self.eyes_submitted = Default::default();
+        Ok(())
     }
 
-    fn acquire_swapchain_image(&mut self) {
+    fn acquire_swapchain_image(&mut self) -> Result<(), vr::EVRCompositorError> {
         let swapchain = &mut self
             .swapchain_data
             .as_mut()
             .expect("Can't acquire swapchain image with no swapchain!")
             .swapchain;
 
-        self.image_index = swapchain
-            .acquire_image()
-            .expect("Failed to acquire swapchain image") as usize;
+        self.image_index = match swapchain.acquire_image() {
+            Ok(index) => index as usize,
+            Err(err) => {
+                crate::warn_once!("Failed to acquire swapchain image: {}", err);
+                // Discard the swapchain, so that the next Submit creates a new one.
+                self.swapchain_data = None;
+                self.image_acquired = false;
+                return Err(vr::EVRCompositorError::RequestFailed);
+            }
+        };
 
         trace!("waiting image");
         {
@@ -1170,6 +1190,7 @@ impl<G: GraphicsBackend> FrameController<G> {
         }
 
         self.image_acquired = true;
+        Ok(())
     }
 
     fn wait_frame(&mut self) -> (xr::Time, i64) {
@@ -1196,7 +1217,8 @@ impl<G: GraphicsBackend> FrameController<G> {
         }
 
         if self.swapchain_data.is_some() {
-            self.acquire_swapchain_image();
+            // If this fails, the swapchain is recreated by Submit, which can report the error.
+            let _ = self.acquire_swapchain_image();
         }
 
         {
@@ -1235,7 +1257,7 @@ impl<G: GraphicsBackend> FrameController<G> {
                 .swapchain_info_for_texture(texture, bounds, color_space);
 
             is_valid_swapchain_info(&new_info)
-                .then(|| {
+                .then(|| -> Result<SubmittedEye, vr::EVRCompositorError> {
                     assert!(
                         !self.submitting_null,
                         "App submitted a null texture and a normal texture in the same frame"
@@ -1244,11 +1266,18 @@ impl<G: GraphicsBackend> FrameController<G> {
                     if !self.swapchain_data.as_ref().is_some_and(|data| {
                         is_usable_swapchain(&data.info, data.initial_format, &new_info)
                     }) {
-                        info!("recreating swapchain (for {eye:?})");
-                        self.recreate_swapchain(session_data, new_info);
+                        if self.recreate_failed {
+                            // Don't flood the log while the runtime keeps failing.
+                            debug!("retrying swapchain recreation (for {eye:?})");
+                        } else {
+                            info!("recreating swapchain (for {eye:?})");
+                        }
+                        let result = self.recreate_swapchain(session_data, new_info);
+                        self.recreate_failed = result.is_err();
+                        result?;
                     }
 
-                    SubmittedEye {
+                    Ok(SubmittedEye {
                         extent: self.backend.copy_texture_to_swapchain(
                             eye,
                             texture,
@@ -1258,8 +1287,9 @@ impl<G: GraphicsBackend> FrameController<G> {
                             submit_flags,
                         ),
                         flip_vertically: bounds.vertically_flipped(),
-                    }
+                    })
                 })
+                .transpose()?
                 .or_else(|| {
                     trace!("submitting null this frame");
                     self.submitting_null = true;
@@ -1650,6 +1680,98 @@ mod tests {
                 "Bound didn't return InvalidBounds: {bound:?}"
             );
         }
+    }
+
+    fn has_swapchain(f: &Fixture) -> bool {
+        let data = f.comp.openxr.session_data.get();
+        let lock = data.comp_data.0.lock().unwrap();
+        let DynFrameController::Fake(ctrl) = lock.as_ref().unwrap() else {
+            panic!("Frame controller was not set up or not faked!");
+        };
+        ctrl.swapchain_data.is_some()
+    }
+
+    fn recreate_failed(f: &Fixture) -> bool {
+        let data = f.comp.openxr.session_data.get();
+        let lock = data.comp_data.0.lock().unwrap();
+        let DynFrameController::Fake(ctrl) = lock.as_ref().unwrap() else {
+            panic!("Frame controller was not set up or not faked!");
+        };
+        ctrl.recreate_failed
+    }
+
+    #[test]
+    fn swapchain_creation_failure_on_session_restart() {
+        let f = Fixture::new();
+
+        // The runtime failing to create the swapchain must not abort the game.
+        fakexr::fail_next_swapchain_create(xr::sys::Result::ERROR_RUNTIME_FAILURE);
+        f.ensure_real_session(false);
+        assert!(!has_swapchain(&f));
+
+        // Creation is retried once we need to render.
+        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_eq!(f.submit(vr::EVREye::Right), None);
+        assert!(has_swapchain(&f));
+    }
+
+    #[test]
+    fn swapchain_creation_failure_on_recreate() {
+        let f = Fixture::new();
+        f.ensure_real_session(false);
+
+        SWAPCHAIN_WIDTH.set(40);
+        assert_eq!(f.wait_get_poses(), None);
+        fakexr::fail_next_swapchain_create(xr::sys::Result::ERROR_RUNTIME_FAILURE);
+        assert_eq!(f.submit(vr::EVREye::Left), RequestFailed);
+        assert!(recreate_failed(&f));
+
+        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_eq!(f.submit(vr::EVREye::Right), None);
+        assert!(has_swapchain(&f));
+        assert!(!recreate_failed(&f));
+        SWAPCHAIN_WIDTH.set(10);
+    }
+
+    #[test]
+    fn swapchain_acquire_failure_on_begin_frame() {
+        let f = Fixture::new();
+        f.ensure_real_session(false);
+
+        // The failure happens while beginning the frame, so there is no Submit to return an error
+        // from. The swapchain is discarded and recreated by the following Submit instead.
+        fakexr::fail_next_swapchain_acquire(xr::sys::Result::ERROR_RUNTIME_FAILURE);
+        assert_eq!(f.wait_get_poses(), None);
+        assert!(!has_swapchain(&f));
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_eq!(f.submit(vr::EVREye::Right), None);
+        assert!(has_swapchain(&f));
+
+        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_eq!(f.submit(vr::EVREye::Right), None);
+    }
+
+    #[test]
+    fn swapchain_acquire_failure_on_recreate() {
+        let f = Fixture::new();
+        f.ensure_real_session(false);
+
+        SWAPCHAIN_WIDTH.set(40);
+        assert_eq!(f.wait_get_poses(), None);
+        fakexr::fail_next_swapchain_acquire(xr::sys::Result::ERROR_RUNTIME_FAILURE);
+        assert_eq!(f.submit(vr::EVREye::Left), RequestFailed);
+        assert!(!has_swapchain(&f));
+        assert!(recreate_failed(&f));
+
+        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_eq!(f.submit(vr::EVREye::Right), None);
+        assert!(has_swapchain(&f));
+        assert!(!recreate_failed(&f));
+        SWAPCHAIN_WIDTH.set(10);
     }
 
     #[test]
