@@ -189,6 +189,12 @@ pub fn fail_next_swapchain_acquire(result: xr::Result) {
     FAIL_NEXT_SWAPCHAIN_ACQUIRE.set(Some(result));
 }
 
+/// Sets the fov that xrLocateViews reports for both views. Defaults to a valid, symmetric fov.
+pub fn set_view_fov(session: xr::Session, fov: xr::Fovf) {
+    let session = session.to_handle().unwrap();
+    session.view_fov.store(fov);
+}
+
 /// A composition layer passed to xrEndFrame.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SubmittedLayer {
@@ -581,6 +587,7 @@ struct Session {
     should_render: AtomicBool,
     frame_state: AtomicCell<FrameState>,
     last_frame_layers: Mutex<Vec<SubmittedLayer>>,
+    view_fov: AtomicCell<xr::Fovf>,
     with_trackers: AtomicBool,
 }
 
@@ -926,6 +933,13 @@ extern "system" fn create_session(
         should_render: false.into(),
         frame_state: FrameState::Ended.into(),
         last_frame_layers: Default::default(),
+        view_fov: xr::Fovf {
+            angle_left: -0.8,
+            angle_right: 0.8,
+            angle_up: 0.8,
+            angle_down: -0.8,
+        }
+        .into(),
         with_trackers: false.into(),
     });
 
@@ -1819,7 +1833,7 @@ extern "system" fn locate_views(
     output: *mut u32,
     views: *mut xr::View,
 ) -> xr::Result {
-    let _session = get_handle!(session);
+    let session = get_handle!(session);
     if let Some(result) = LOCATE_VIEWS_FAILURE.get() {
         return result;
     }
@@ -1847,7 +1861,7 @@ extern "system" fn locate_views(
             ty: xr::View::TYPE,
             next: std::ptr::null_mut(),
             pose: xr::Posef::default(),
-            fov: xr::Fovf::default(),
+            fov: session.view_fov.load(),
         };
         views[0] = view;
         views[1] = view;

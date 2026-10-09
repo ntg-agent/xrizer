@@ -237,9 +237,9 @@ mod view_cache_tests {
     use crate::{clientcore::Injector, openxr_data::OpenXrData};
     use vr::IVRSystem022_Interface;
 
-    // The fake runtime reports a zero FOV for both eyes, which is distinguishable from the
-    // fallback FOV used when xrLocateViews fails.
-    const FAKEXR_PROJECTION: [f32; 4] = [0.0; 4];
+    // The fake runtime reports a FOV of +-0.8 radians for both eyes (tan(0.8) = 1.0296385), which
+    // is distinguishable from the fallback FOV used when xrLocateViews fails.
+    const FAKEXR_PROJECTION: [f32; 4] = [-1.0296385, 1.0296385, -1.0296385, 1.0296385];
     const DEFAULT_PROJECTION: [f32; 4] = [-1.0, 1.0, -1.0, 1.0];
 
     fn system() -> System {
