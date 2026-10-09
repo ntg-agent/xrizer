@@ -784,11 +784,40 @@ impl vr::IVRSystem026_Interface for System {
     }
     fn ApplyTransform(
         &self,
-        _: *mut vr::TrackedDevicePose_t,
-        _: *const vr::TrackedDevicePose_t,
-        _: *const vr::HmdMatrix34_t,
+        output: *mut vr::TrackedDevicePose_t,
+        pose: *const vr::TrackedDevicePose_t,
+        transform: *const vr::HmdMatrix34_t,
     ) {
-        todo!()
+        // Copy the inputs first, since the output may alias the input pose.
+        let (Some(pose), Some(t)) = (
+            unsafe { pose.as_ref() }.copied(),
+            unsafe { transform.as_ref() }.map(|t| t.m),
+        ) else {
+            return;
+        };
+        let Some(output) = (unsafe { output.as_mut() }) else {
+            return;
+        };
+
+        // T * P, where the translation column of P (c == 3) is also moved by T's translation.
+        let p = pose.mDeviceToAbsoluteTracking.m;
+        let m = std::array::from_fn(|r| {
+            std::array::from_fn(|c| {
+                let rotated: f32 = (0..3).map(|k| t[r][k] * p[k][c]).sum();
+                if c == 3 { rotated + t[r][3] } else { rotated }
+            })
+        });
+        // Velocities are vectors, so they are only rotated.
+        let rotate = |v: [f32; 3]| vr::HmdVector3_t {
+            v: std::array::from_fn(|r| (0..3).map(|k| t[r][k] * v[k]).sum()),
+        };
+
+        *output = vr::TrackedDevicePose_t {
+            mDeviceToAbsoluteTracking: vr::HmdMatrix34_t { m },
+            vVelocity: rotate(pose.vVelocity.v),
+            vAngularVelocity: rotate(pose.vAngularVelocity.v),
+            ..pose
+        };
     }
     fn GetTrackedDeviceActivityLevel(
         &self,
@@ -1096,5 +1125,64 @@ mod tests {
         test_prop(vr::ETrackedDeviceProperty::SerialNumber_String);
         test_prop(vr::ETrackedDeviceProperty::ManufacturerName_String);
         test_prop(vr::ETrackedDeviceProperty::ControllerType_String);
+    }
+
+    #[test]
+    fn apply_transform() {
+        let xr = Arc::new(OpenXrData::new(&Injector::default()).unwrap());
+        let system = System::new(xr, &Injector::default());
+        let apply = vr::IVRSystem026_Interface::ApplyTransform;
+
+        // At (1, 2, 3), rotated 90 degrees about Z, moving along x and turning about z.
+        let pose = vr::TrackedDevicePose_t {
+            mDeviceToAbsoluteTracking: vr::HmdMatrix34_t {
+                m: [
+                    [0.0, -1.0, 0.0, 1.0],
+                    [1.0, 0.0, 0.0, 2.0],
+                    [0.0, 0.0, 1.0, 3.0],
+                ],
+            },
+            vVelocity: vr::HmdVector3_t { v: [1.0, 0.0, 0.0] },
+            vAngularVelocity: vr::HmdVector3_t { v: [0.0, 0.0, 1.0] },
+            eTrackingResult: vr::ETrackingResult::Running_OutOfRange,
+            bPoseIsValid: true,
+            bDeviceIsConnected: false,
+        };
+        // +90 degrees about Y (x axis -> -z axis), then move by (10, 20, 30).
+        let yaw = vr::HmdMatrix34_t {
+            m: [
+                [0.0, 0.0, 1.0, 10.0],
+                [0.0, 1.0, 0.0, 20.0],
+                [-1.0, 0.0, 0.0, 30.0],
+            ],
+        };
+
+        let mut out = vr::TrackedDevicePose_t::default();
+        apply(&system, &mut out, &pose, &yaw);
+        assert_eq!(
+            out.mDeviceToAbsoluteTracking.m,
+            [
+                [0.0, 0.0, 1.0, 13.0],
+                [1.0, 0.0, 0.0, 22.0],
+                [0.0, 1.0, 0.0, 29.0]
+            ]
+        );
+        assert_eq!(out.vVelocity.v, [0.0, 0.0, -1.0]);
+        assert_eq!(out.vAngularVelocity.v, [1.0, 0.0, 0.0]);
+        assert_eq!(out.eTrackingResult, pose.eTrackingResult);
+        assert!(out.bPoseIsValid && !out.bDeviceIsConnected);
+
+        // The output may be the input.
+        let mut aliased = pose;
+        let ptr = &raw mut aliased;
+        apply(&system, ptr, ptr, &yaw);
+        assert_eq!(format!("{aliased:?}"), format!("{out:?}"));
+
+        // Nothing is written if a pointer is null.
+        let before = format!("{out:?}");
+        apply(&system, &mut out, std::ptr::null(), &yaw);
+        apply(&system, &mut out, &pose, std::ptr::null());
+        apply(&system, std::ptr::null_mut(), &pose, &yaw);
+        assert_eq!(format!("{out:?}"), before);
     }
 }
