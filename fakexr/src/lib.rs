@@ -11,6 +11,7 @@ use openxr_sys as xr;
 use openxr_sys::Handle as _;
 use paste::paste;
 use slotmap::{DefaultKey, Key, KeyData, SlotMap};
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString, c_char};
 use std::sync::{
@@ -162,6 +163,23 @@ pub fn get_suggested_bindings(action: xr::Action, profile: xr::Path) -> Vec<Stri
 pub fn session_frame_state(session: xr::Session) -> FrameState {
     let session = session.to_handle().unwrap();
     session.frame_state.load()
+}
+
+thread_local! {
+    static FAIL_NEXT_SWAPCHAIN_CREATE: Cell<Option<xr::Result>> = const { Cell::new(None) };
+    static FAIL_NEXT_SWAPCHAIN_ACQUIRE: Cell<Option<xr::Result>> = const { Cell::new(None) };
+}
+
+/// Makes the next `xrCreateSwapchain` call on the current thread return `result` without
+/// creating a swapchain. The failure is consumed by that call, so later calls succeed again.
+pub fn fail_next_swapchain_create(result: xr::Result) {
+    FAIL_NEXT_SWAPCHAIN_CREATE.set(Some(result));
+}
+
+/// Makes the next `xrAcquireSwapchainImage` call on the current thread return `result` without
+/// acquiring an image. The failure is consumed by that call, so later calls succeed again.
+pub fn fail_next_swapchain_acquire(result: xr::Result) {
+    FAIL_NEXT_SWAPCHAIN_ACQUIRE.set(Some(result));
 }
 
 macro_rules! fn_unimplemented_impl {
@@ -1612,6 +1630,9 @@ extern "system" fn create_swapchain(
     info: *const xr::SwapchainCreateInfo,
     swapchain: *mut xr::Swapchain,
 ) -> xr::Result {
+    if let Some(result) = FAIL_NEXT_SWAPCHAIN_CREATE.take() {
+        return result;
+    }
     let info = unsafe { info.as_ref() }.unwrap();
     if info.width == 0 || info.height == 0 {
         return xr::Result::ERROR_VALIDATION_FAILURE;
@@ -1667,6 +1688,9 @@ extern "system" fn acquire_swapchain_image(
     _index: *mut u32,
 ) -> xr::Result {
     let swapchain = get_handle!(swapchain);
+    if let Some(result) = FAIL_NEXT_SWAPCHAIN_ACQUIRE.take() {
+        return result;
+    }
     swapchain.image_acquired.store(true, Ordering::Relaxed);
     xr::Result::SUCCESS
 }
