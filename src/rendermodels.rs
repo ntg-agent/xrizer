@@ -160,20 +160,22 @@ impl vr::IVRRenderModels006_Interface for RenderModels {
     fn GetRenderModelOriginalPath(
         &self,
         _: *const std::ffi::c_char,
-        _: *mut std::ffi::c_char,
-        _: u32,
-        _: *mut vr::EVRRenderModelError,
+        buffer: *mut std::ffi::c_char,
+        buffer_len: u32,
+        error: *mut vr::EVRRenderModelError,
     ) -> u32 {
-        todo!()
+        crate::warn_unimplemented!("GetRenderModelOriginalPath");
+        write_not_supported(buffer, buffer_len, error)
     }
     fn GetRenderModelThumbnailURL(
         &self,
         _: *const std::ffi::c_char,
-        _: *mut std::ffi::c_char,
-        _: u32,
-        _: *mut vr::EVRRenderModelError,
+        buffer: *mut std::ffi::c_char,
+        buffer_len: u32,
+        error: *mut vr::EVRRenderModelError,
     ) -> u32 {
-        todo!()
+        crate::warn_unimplemented!("GetRenderModelThumbnailURL");
+        write_not_supported(buffer, buffer_len, error)
     }
     fn RenderModelHasComponent(
         &self,
@@ -330,7 +332,7 @@ impl vr::IVRRenderModels006_Interface for RenderModels {
         cstr_write_out(&cstr, render_model_name, render_model_name_len)
     }
     fn FreeTextureD3D11(&self, _: *mut std::ffi::c_void) {
-        todo!()
+        crate::warn_unimplemented!("FreeTextureD3D11");
     }
     fn LoadIntoTextureD3D11_Async(
         &self,
@@ -659,6 +661,21 @@ fn cstr_write_out(cstr: &CStr, out_ptr: *mut std::ffi::c_char, out_len: u32) -> 
     out[..bytes.len()].copy_from_slice(bytes);
 
     bytes.len() as u32
+}
+
+/// Reports `NotSupported` and an empty string for queries that have no answer.
+fn write_not_supported(
+    buffer: *mut std::ffi::c_char,
+    buffer_len: u32,
+    error: *mut vr::EVRRenderModelError,
+) -> u32 {
+    if !buffer.is_null() && buffer_len > 0 {
+        unsafe { buffer.write(0) };
+    }
+    if let Some(error) = unsafe { error.as_mut() } {
+        *error = vr::EVRRenderModelError::NotSupported;
+    }
+    0
 }
 
 #[cfg(test)]
@@ -1121,5 +1138,79 @@ mod tests {
                 "{name}: vertex count mismatch"
             );
         }
+    }
+
+    #[test]
+    fn original_path_and_thumbnail_url_are_not_supported() {
+        let rm = RenderModels::default();
+        let name = c"some_model";
+
+        type Getter = fn(
+            &RenderModels,
+            *const std::ffi::c_char,
+            *mut std::ffi::c_char,
+            u32,
+            *mut vr::EVRRenderModelError,
+        ) -> u32;
+        let getters: [Getter; 2] = [
+            <RenderModels as vr::IVRRenderModels006_Interface>::GetRenderModelOriginalPath,
+            <RenderModels as vr::IVRRenderModels006_Interface>::GetRenderModelThumbnailURL,
+        ];
+
+        for get in getters {
+            // buffer is terminated and the error is reported
+            let mut buf = [0x7f as std::ffi::c_char; 8];
+            let mut err = vr::EVRRenderModelError::None;
+            assert_eq!(
+                get(
+                    &rm,
+                    name.as_ptr(),
+                    buf.as_mut_ptr(),
+                    buf.len() as u32,
+                    &mut err
+                ),
+                0
+            );
+            assert_eq!(err, vr::EVRRenderModelError::NotSupported);
+            assert_eq!(buf[0], 0);
+            assert!(buf[1..].iter().all(|&c| c == 0x7f));
+
+            // a zero-sized buffer is left untouched
+            let mut buf = [0x7f as std::ffi::c_char; 8];
+            let mut err = vr::EVRRenderModelError::None;
+            assert_eq!(get(&rm, name.as_ptr(), buf.as_mut_ptr(), 0, &mut err), 0);
+            assert_eq!(err, vr::EVRRenderModelError::NotSupported);
+            assert!(buf.iter().all(|&c| c == 0x7f));
+
+            // null buffer and null error pointer are accepted
+            let mut err = vr::EVRRenderModelError::None;
+            assert_eq!(get(&rm, name.as_ptr(), ptr::null_mut(), 8, &mut err), 0);
+            assert_eq!(err, vr::EVRRenderModelError::NotSupported);
+            let mut buf = [0x7f as std::ffi::c_char; 8];
+            assert_eq!(
+                get(
+                    &rm,
+                    ptr::null(),
+                    buf.as_mut_ptr(),
+                    buf.len() as u32,
+                    ptr::null_mut()
+                ),
+                0
+            );
+            assert_eq!(buf[0], 0);
+            assert_eq!(
+                get(&rm, ptr::null(), ptr::null_mut(), 0, ptr::null_mut()),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn free_texture_d3d11_is_noop() {
+        let rm = RenderModels::default();
+
+        // null and garbage pointers must not be dereferenced
+        rm.FreeTextureD3D11(ptr::null_mut());
+        rm.FreeTextureD3D11(111111usize as *mut std::ffi::c_void);
     }
 }
