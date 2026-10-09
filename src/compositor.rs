@@ -1960,6 +1960,57 @@ mod tests {
     }
 
     #[test]
+    fn submit_overlay_missing_swapchain_after_session_restart() {
+        use crate::overlay::OverlayMan;
+        use vr::IVROverlay027_Interface;
+
+        let f = Fixture::new();
+        let overlays = Arc::new(OverlayMan::new(f.comp.openxr.clone(), &Injector::default()));
+        f.comp.overlays.set(Arc::downgrade(&overlays));
+        overlays.compositor.set(Arc::downgrade(&f.comp));
+
+        let create_overlay = |key: &CStr, name: &CStr| {
+            let mut overlay = 0;
+            assert_eq!(
+                overlays.CreateOverlay(key.as_ptr(), name.as_ptr(), &mut overlay),
+                vr::EVROverlayError::None
+            );
+            overlay
+        };
+        let stale = create_overlay(c"stale_overlay", c"StaleOverlay");
+        let fresh = create_overlay(c"fresh_overlay", c"FreshOverlay");
+
+        assert_eq!(f.wait_get_poses(), None);
+        for overlay in [stale, fresh] {
+            assert_eq!(
+                overlays.SetOverlayTexture(overlay, &FakeGraphicsData::texture(&f.vk)),
+                vr::EVROverlayError::None
+            );
+            assert_eq!(overlays.ShowOverlay(overlay), vr::EVROverlayError::None);
+        }
+
+        // Restarting the session drops the swapchains of every overlay, but the overlays still
+        // have their texture rect and stay visible.
+        f.comp.openxr.restart_session();
+
+        // Only one of the overlays gets a new texture before the next frame is submitted.
+        assert_eq!(
+            overlays.SetOverlayTexture(fresh, &FakeGraphicsData::texture(&f.vk)),
+            vr::EVROverlayError::None
+        );
+
+        {
+            // The overlay without a swapchain should be left out of the frame.
+            let session = f.comp.openxr.session_data.get();
+            let layers = overlays.get_layers::<FakeApi>(&session, true);
+            assert_eq!(layers.len(), 1);
+        }
+
+        f.comp.PostPresentHandoff();
+        f.check_frame_state(fakexr::FrameState::Ended);
+    }
+
+    #[test]
     fn submit_overlay_without_projection_layer() {
         use crate::overlay::OverlayMan;
         use vr::IVROverlay027_Interface;
