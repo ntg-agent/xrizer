@@ -307,10 +307,15 @@ impl vr::IVRCompositor029_Interface for Compositor {
     fn GetPosesForFrame(
         &self,
         _unPosePredictionID: u32,
-        _pPoseArray: *mut vr::TrackedDevicePose_t,
-        _unPoseArrayCount: u32,
+        pPoseArray: *mut vr::TrackedDevicePose_t,
+        unPoseArrayCount: u32,
     ) -> vr::EVRCompositorError {
-        todo!()
+        // Pose prediction IDs aren't tracked (see GetLastPosePredictionIDs),
+        // so return the latest render poses, same as GetLastPoses.
+        if unPoseArrayCount > 0 && pPoseArray.is_null() {
+            return vr::EVRCompositorError::RequestFailed;
+        }
+        self.GetLastPoses(pPoseArray, unPoseArrayCount, std::ptr::null_mut(), 0)
     }
     fn GetLastPosePredictionIDs(
         &self,
@@ -1988,5 +1993,55 @@ mod tests {
         assert_eq!(overlays.ShowOverlay(overlay), vr::EVROverlayError::None);
         f.comp.PostPresentHandoff();
         f.check_frame_state(fakexr::FrameState::Ended);
+    }
+
+    #[test]
+    fn get_poses_for_frame() {
+        let f = Fixture::new();
+        f.ensure_real_session(false);
+        // fakexr can only locate devices relative to the local space
+        vr::IVRCompositor029_Interface::SetTrackingSpace(
+            &*f.comp,
+            vr::ETrackingUniverseOrigin::Seated,
+        );
+
+        let mut frame_poses = [vr::TrackedDevicePose_t::default(); 2];
+        let mut last_poses = [vr::TrackedDevicePose_t::default(); 2];
+        assert_eq!(
+            vr::IVRCompositor029_Interface::GetPosesForFrame(
+                &*f.comp,
+                0,
+                frame_poses.as_mut_ptr(),
+                frame_poses.len() as u32
+            ),
+            None
+        );
+        assert_eq!(
+            vr::IVRCompositor029_Interface::GetLastPoses(
+                &*f.comp,
+                last_poses.as_mut_ptr(),
+                last_poses.len() as u32,
+                std::ptr::null_mut(),
+                0
+            ),
+            None
+        );
+        for (frame, last) in frame_poses.iter().zip(&last_poses) {
+            assert_eq!(frame.bPoseIsValid, last.bPoseIsValid);
+            assert_eq!(frame.eTrackingResult, last.eTrackingResult);
+            assert_eq!(
+                frame.mDeviceToAbsoluteTracking.m,
+                last.mDeviceToAbsoluteTracking.m
+            );
+        }
+
+        assert_eq!(
+            vr::IVRCompositor029_Interface::GetPosesForFrame(&*f.comp, 0, std::ptr::null_mut(), 0),
+            None
+        );
+        assert_eq!(
+            vr::IVRCompositor029_Interface::GetPosesForFrame(&*f.comp, 0, std::ptr::null_mut(), 1),
+            RequestFailed
+        );
     }
 }
