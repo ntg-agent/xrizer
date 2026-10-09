@@ -775,34 +775,47 @@ impl vr::IVROverlay028_Interface for OverlayMan {
     }
 
     fn CloseMessageOverlay(&self) {
-        todo!()
+        crate::warn_unimplemented!("CloseMessageOverlay");
     }
     fn ShowMessageOverlay(
         &self,
-        _: *const c_char,
-        _: *const c_char,
+        text: *const c_char,
+        caption: *const c_char,
         _: *const c_char,
         _: *const c_char,
         _: *const c_char,
         _: *const c_char,
     ) -> vr::VRMessageOverlayResponse {
-        todo!()
+        crate::warn_unimplemented!("ShowMessageOverlay");
+        let lossy = |p: *const c_char| {
+            (!p.is_null()).then(|| unsafe { CStr::from_ptr(p) }.to_string_lossy())
+        };
+        log::warn!(
+            "ShowMessageOverlay: caption {:?}, text {:?}",
+            lossy(caption).unwrap_or_default(),
+            lossy(text).unwrap_or_default()
+        );
+        vr::VRMessageOverlayResponse::CouldntFindSystemOverlay
     }
     fn SetKeyboardPositionForOverlay(&self, _: vr::VROverlayHandle_t, _: vr::HmdRect2_t) {
-        todo!()
+        crate::warn_unimplemented!("SetKeyboardPositionForOverlay");
     }
     fn SetKeyboardTransformAbsolute(
         &self,
         _: vr::ETrackingUniverseOrigin,
         _: *const vr::HmdMatrix34_t,
     ) {
-        todo!()
+        crate::warn_unimplemented!("SetKeyboardTransformAbsolute");
     }
     fn HideKeyboard(&self) {
         crate::warn_unimplemented!("HideKeyboard");
     }
-    fn GetKeyboardText(&self, _: *mut c_char, _: u32) -> u32 {
-        todo!()
+    fn GetKeyboardText(&self, text: *mut c_char, size: u32) -> u32 {
+        crate::warn_unimplemented!("GetKeyboardText");
+        if !text.is_null() && size > 0 {
+            unsafe { text.write(0) }
+        }
+        0
     }
     fn ShowKeyboardForOverlay(
         &self,
@@ -832,27 +845,35 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         vr::EVROverlayError::RequestFailed
     }
     fn GetPrimaryDashboardDevice(&self) -> vr::TrackedDeviceIndex_t {
-        todo!()
+        crate::warn_unimplemented!("GetPrimaryDashboardDevice");
+        vr::k_unTrackedDeviceIndexInvalid
     }
     fn ShowDashboard(&self, _: *const c_char) {
-        todo!()
+        crate::warn_unimplemented!("ShowDashboard");
     }
     fn GetDashboardOverlaySceneProcess(
         &self,
-        _: vr::VROverlayHandle_t,
-        _: *mut u32,
+        handle: vr::VROverlayHandle_t,
+        process: *mut u32,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetDashboardOverlaySceneProcess");
+        get_overlay!(self, handle, _overlay);
+        if process.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
+        unsafe { process.write(0) };
+        vr::EVROverlayError::None
     }
     fn SetDashboardOverlaySceneProcess(
         &self,
         _: vr::VROverlayHandle_t,
         _: u32,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("SetDashboardOverlaySceneProcess");
+        vr::EVROverlayError::None
     }
     fn IsActiveDashboardOverlay(&self, _: vr::VROverlayHandle_t) -> bool {
-        todo!()
+        false
     }
     fn IsDashboardVisible(&self) -> bool {
         false
@@ -868,18 +889,30 @@ impl vr::IVROverlay028_Interface for OverlayMan {
     }
     fn GetOverlayTextureSize(
         &self,
-        _: vr::VROverlayHandle_t,
-        _: *mut u32,
-        _: *mut u32,
+        handle: vr::VROverlayHandle_t,
+        width: *mut u32,
+        height: *mut u32,
     ) -> vr::EVROverlayError {
-        todo!()
+        get_overlay!(self, handle, overlay);
+        if width.is_null() || height.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
+        let (w, h) = overlay
+            .rect
+            .map_or((0, 0), |r| (r.extent.width as u32, r.extent.height as u32));
+        unsafe {
+            width.write(w);
+            height.write(h);
+        }
+        vr::EVROverlayError::None
     }
     fn ReleaseNativeOverlayHandle(
         &self,
         _: vr::VROverlayHandle_t,
         _: *mut c_void,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("ReleaseNativeOverlayHandle");
+        vr::EVROverlayError::InvalidHandle
     }
     fn GetOverlayTexture(
         &self,
@@ -893,14 +926,16 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         _: *mut vr::EColorSpace,
         _: *mut vr::VRTextureBounds_t,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayTexture");
+        vr::EVROverlayError::RequestFailed
     }
     fn SetOverlayFromFile(
         &self,
         _: vr::VROverlayHandle_t,
         _: *const c_char,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("SetOverlayFromFile");
+        vr::EVROverlayError::None
     }
     fn SetOverlayRaw(
         &self,
@@ -918,21 +953,24 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         vr::EVROverlayError::None
     }
     fn ClearOverlayCursorPositionOverride(&self, _: vr::VROverlayHandle_t) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("ClearOverlayCursorPositionOverride");
+        vr::EVROverlayError::None
     }
     fn SetOverlayCursorPositionOverride(
         &self,
         _: vr::VROverlayHandle_t,
         _: *const vr::HmdVector2_t,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("SetOverlayCursorPositionOverride");
+        vr::EVROverlayError::None
     }
     fn SetOverlayCursor(
         &self,
         _: vr::VROverlayHandle_t,
         _: vr::VROverlayHandle_t,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("SetOverlayCursor");
+        vr::EVROverlayError::None
     }
     fn TriggerLaserMouseHapticVibration(
         &self,
@@ -941,7 +979,8 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         _: f32,
         _: f32,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("TriggerLaserMouseHapticVibration");
+        vr::EVROverlayError::None
     }
     fn SetOverlayIntersectionMask(
         &self,
@@ -954,7 +993,7 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         vr::EVROverlayError::None
     }
     fn IsHoverTargetOverlay(&self, _: vr::VROverlayHandle_t) -> bool {
-        todo!()
+        false
     }
     fn ComputeOverlayIntersection(
         &self,
@@ -1606,5 +1645,115 @@ impl vr::IVROverlay007On010 for OverlayMan {
         _: *mut vr::vr_0_9_12::VREvent_t,
     ) -> bool {
         todo!()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vr::EVROverlayError as E;
+    use vr::IVROverlay028_Interface;
+
+    fn overlay_man() -> OverlayMan {
+        crate::init_logging();
+        let xr = Arc::new(OpenXrData::new(&Injector::default()).unwrap());
+        OverlayMan::new(xr, &Injector::default())
+    }
+
+    fn create(o: &OverlayMan, key: &CStr) -> vr::VROverlayHandle_t {
+        let mut handle = vr::k_ulOverlayHandleInvalid;
+        let err = o.CreateOverlay(key.as_ptr(), key.as_ptr(), &mut handle);
+        assert_eq!(err, E::None);
+        handle
+    }
+
+    /// Valid handle writes `want`; invalid handle is UnknownOverlay; null out is InvalidParameter.
+    #[track_caller]
+    fn check_getter<T: Copy + PartialEq + std::fmt::Debug>(
+        h: vr::VROverlayHandle_t,
+        init: T,
+        want: T,
+        get: impl Fn(vr::VROverlayHandle_t, *mut T) -> E,
+    ) {
+        let mut v = init;
+        assert_eq!(get(h, &mut v), E::None);
+        assert_eq!(v, want);
+        v = init;
+        assert_eq!(get(vr::k_ulOverlayHandleInvalid, &mut v), E::UnknownOverlay);
+        assert_eq!(v, init);
+        assert_eq!(get(h, std::ptr::null_mut()), E::InvalidParameter);
+    }
+
+    #[test]
+    fn message_keyboard_and_dashboard_stubs() {
+        let o = overlay_man();
+        let h = create(&o, c"key");
+        let (text, caption, n) = (c"text".as_ptr(), c"caption".as_ptr(), std::ptr::null());
+        let resp = vr::VRMessageOverlayResponse::CouldntFindSystemOverlay;
+        assert_eq!(o.ShowMessageOverlay(text, caption, text, n, n, n), resp);
+        assert_eq!(o.ShowMessageOverlay(n, n, n, n, n, n), resp);
+        o.CloseMessageOverlay();
+
+        o.SetKeyboardPositionForOverlay(h, Default::default());
+        o.SetKeyboardTransformAbsolute(vr::ETrackingUniverseOrigin::Seated, std::ptr::null());
+        let mut buf = [1 as c_char; 2];
+        assert_eq!(o.GetKeyboardText(buf.as_mut_ptr(), 0), 0);
+        assert_eq!(buf, [1, 1]);
+        assert_eq!(o.GetKeyboardText(buf.as_mut_ptr(), 2), 0);
+        assert_eq!(buf, [0, 1]);
+        assert_eq!(o.GetKeyboardText(std::ptr::null_mut(), 2), 0);
+
+        let invalid = vr::k_unTrackedDeviceIndexInvalid;
+        assert_eq!(o.GetPrimaryDashboardDevice(), invalid);
+        o.ShowDashboard(std::ptr::null());
+        assert!(!o.IsActiveDashboardOverlay(h));
+        check_getter(h, 7u32, 0, |h, p| o.GetDashboardOverlaySceneProcess(h, p));
+        assert_eq!(o.SetDashboardOverlaySceneProcess(h, 42), E::None);
+    }
+
+    #[test]
+    fn overlay_texture_size() {
+        let o = overlay_man();
+        let h = create(&o, c"key");
+        let (mut w, mut ht) = (7, 7);
+        assert_eq!(o.GetOverlayTextureSize(h, &mut w, &mut ht), E::None);
+        assert_eq!((w, ht), (0, 0));
+
+        let extent = xr::Extent2Di {
+            width: 640,
+            height: 480,
+        };
+        let rect = xr::Rect2Di {
+            extent,
+            ..Default::default()
+        };
+        o.overlays.write().unwrap()[OverlayKey::from(KeyData::from_ffi(h))].rect = Some(rect);
+        assert_eq!(o.GetOverlayTextureSize(h, &mut w, &mut ht), E::None);
+        assert_eq!((w, ht), (640, 480));
+
+        let (null, bad) = (std::ptr::null_mut(), E::InvalidParameter);
+        assert_eq!(o.GetOverlayTextureSize(h, null, &mut ht), bad);
+        assert_eq!(o.GetOverlayTextureSize(h, &mut w, null), bad);
+        let err = o.GetOverlayTextureSize(vr::k_ulOverlayHandleInvalid, &mut w, &mut ht);
+        assert_eq!(err, E::UnknownOverlay);
+    }
+
+    #[test]
+    fn texture_access_and_setter_stubs() {
+        let o = overlay_man();
+        use std::ptr::null_mut as n;
+        let (h, cursor) = (create(&o, c"key"), create(&o, c"cursor"));
+        let mut w = 7u32;
+        assert_eq!(o.ReleaseNativeOverlayHandle(h, n()), E::InvalidHandle);
+        let err = o.GetOverlayTexture(h, n(), n(), &mut w, n(), n(), n(), n(), n());
+        assert_eq!((err, w), (E::RequestFailed, 7));
+
+        let (file, pos) = (c"/x.png".as_ptr(), Default::default());
+        assert_eq!(o.SetOverlayFromFile(h, file), E::None);
+        assert_eq!(o.ClearOverlayCursorPositionOverride(h), E::None);
+        assert_eq!(o.SetOverlayCursorPositionOverride(h, &pos), E::None);
+        assert_eq!(o.SetOverlayCursor(h, cursor), E::None);
+        assert_eq!(o.TriggerLaserMouseHapticVibration(h, 0., 0., 0.), E::None);
+        assert!(!o.IsHoverTargetOverlay(h));
     }
 }
