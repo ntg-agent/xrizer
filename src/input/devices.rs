@@ -190,6 +190,11 @@ impl TrackedDevice {
             }
         };
 
+        // A pose that merely isn't tracked is still "connected", but a device that is gone is not.
+        if let Some(pose) = pose_cache.as_mut() {
+            pose.bDeviceIsConnected &= self.connected;
+        }
+
         *pose_cache
     }
 
@@ -606,7 +611,83 @@ impl<C: openxr_data::Compositor> Input<C> {
 #[cfg(test)]
 mod tests {
     use crate::input::{profiles::knuckles::Knuckles, tests::Fixture};
+    use crate::openxr_data::Hand;
     use openvr as vr;
+    use openxr as xr;
+
+    #[test]
+    fn untracked_pose_is_connected() {
+        let pose = vr::space_relation_to_openvr_pose(
+            xr::SpaceLocation::default(),
+            xr::SpaceVelocity::default(),
+        );
+
+        // The device exists but can't currently be located (e.g. a controller out of camera view),
+        // which is not the same as the device being absent.
+        assert!(pose.bDeviceIsConnected);
+        assert!(!pose.bPoseIsValid);
+        assert_eq!(
+            pose.eTrackingResult,
+            vr::ETrackingResult::Running_OutOfRange
+        );
+    }
+
+    #[test]
+    fn untracked_controller_is_connected() {
+        let mut f = Fixture::new();
+        f.load_actions(c"actions.json");
+        f.set_interaction_profile::<Knuckles>(fakexr::UserPath::LeftHand);
+        // The runtime applies the new interaction profile when the info set is synced, which
+        // creates the controller. The pose actions haven't been synced, so it can't be located.
+        f.input.frame_start_update();
+        f.input.openxr.poll_events();
+        f.input.frame_start_update();
+
+        let pose = f
+            .input
+            .get_controller_pose(Hand::Left, Some(vr::ETrackingUniverseOrigin::Seated))
+            .unwrap();
+        assert!(!pose.bPoseIsValid);
+        assert_eq!(
+            pose.eTrackingResult,
+            vr::ETrackingResult::Running_OutOfRange
+        );
+        assert!(pose.bDeviceIsConnected);
+        assert!(f.input.is_device_connected(1));
+    }
+
+    #[test]
+    fn disconnected_controller_pose_is_not_connected() {
+        let mut f = Fixture::new();
+        f.load_actions(c"actions.json");
+        f.set_interaction_profile::<Knuckles>(fakexr::UserPath::LeftHand);
+        f.input.frame_start_update();
+        f.input.openxr.poll_events();
+        f.input.frame_start_update();
+        assert!(f.input.is_device_connected(1));
+
+        // The controller loses its interaction profile, but stays in the device list.
+        fakexr::set_interaction_profile(
+            f.raw_session(),
+            fakexr::UserPath::LeftHand,
+            xr::Path::NULL,
+        );
+        let set1 = f.get_action_set_handle(c"/actions/set1");
+        f.sync(vr::VRActiveActionSet_t {
+            ulActionSet: set1,
+            ..Default::default()
+        });
+        f.input.openxr.poll_events();
+        f.input.frame_start_update();
+        assert!(!f.input.is_device_connected(1));
+
+        let pose = f
+            .input
+            .get_controller_pose(Hand::Left, Some(vr::ETrackingUniverseOrigin::Seated))
+            .unwrap();
+        assert!(!pose.bPoseIsValid);
+        assert!(!pose.bDeviceIsConnected);
+    }
 
     #[test]
     #[cfg_attr(not(feature = "monado"), ignore)]

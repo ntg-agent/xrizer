@@ -9,9 +9,11 @@ pub fn space_relation_to_openvr_pose(
     if !location.location_flags.contains(
         xr::SpaceLocationFlags::POSITION_VALID | xr::SpaceLocationFlags::ORIENTATION_VALID,
     ) {
+        // The device exists, it just can't be located right now (e.g. a controller that the
+        // cameras have lost sight of), so it is still connected, as in SteamVR.
         return TrackedDevicePose_t {
             bPoseIsValid: false,
-            bDeviceIsConnected: false,
+            bDeviceIsConnected: true,
             mDeviceToAbsoluteTracking: Default::default(),
             vVelocity: Default::default(),
             vAngularVelocity: Default::default(),
