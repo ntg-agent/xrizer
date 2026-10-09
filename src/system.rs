@@ -9,8 +9,9 @@ use glam::{Mat3, Quat, Vec3};
 use log::{debug, error, trace, warn};
 use openvr as vr;
 use openxr as xr;
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 #[derive(Copy, Clone)]
 pub struct ViewData {
@@ -313,14 +314,19 @@ impl vr::IVRSystem026_Interface for System {
     fn SetSDKVersion(&self, _: u32, _: u32, _: u32) -> vr::EVRInitError {
         vr::EVRInitError::None
     }
-    fn GetAppContainerFilePaths(&self, _: *mut std::os::raw::c_char, _: u32) -> u32 {
-        todo!()
+    fn GetAppContainerFilePaths(&self, buffer: *mut std::os::raw::c_char, size: u32) -> u32 {
+        // xrizer has no app container paths, so return an empty string.
+        if !buffer.is_null() && size > 0 {
+            unsafe { buffer.write(0) };
+        }
+        0
     }
     fn AcknowledgeQuit_Exiting(&self) {
         todo!()
     }
     fn PerformFirmwareUpdate(&self, _: vr::TrackedDeviceIndex_t) -> vr::EVRFirmwareError {
-        todo!()
+        crate::warn_unimplemented!("PerformFirmwareUpdate");
+        vr::EVRFirmwareError::Fail
     }
     fn ShouldApplicationReduceRenderingWork(&self) -> bool {
         false
@@ -478,8 +484,15 @@ impl vr::IVRSystem026_Interface for System {
         false
     }
 
-    fn GetEventTypeNameFromEnum(&self, _: vr::EVREventType) -> *const std::os::raw::c_char {
-        todo!()
+    fn GetEventTypeNameFromEnum(&self, ty: vr::EVREventType) -> *const std::os::raw::c_char {
+        static NAMES: LazyLock<Mutex<HashMap<vr::EVREventType, CString>>> =
+            LazyLock::new(Default::default);
+        NAMES
+            .lock()
+            .unwrap()
+            .entry(ty)
+            .or_insert_with(|| CString::new(format!("VREvent_{ty:?}")).unwrap())
+            .as_ptr()
     }
 
     fn PollNextEventWithPoseAndOverlays(
@@ -611,14 +624,22 @@ impl vr::IVRSystem026_Interface for System {
     }
     fn GetArrayTrackedDeviceProperty(
         &self,
-        _: vr::TrackedDeviceIndex_t,
+        device_index: vr::TrackedDeviceIndex_t,
         _: vr::ETrackedDeviceProperty,
         _: vr::PropertyTypeTag_t,
         _: *mut std::os::raw::c_void,
         _: u32,
-        _: *mut vr::ETrackedPropertyError,
+        error: *mut vr::ETrackedPropertyError,
     ) -> u32 {
-        todo!()
+        crate::warn_unimplemented!("GetArrayTrackedDeviceProperty");
+        if let Some(error) = unsafe { error.as_mut() } {
+            *error = if self.IsTrackedDeviceConnected(device_index) {
+                vr::ETrackedPropertyError::UnknownProperty
+            } else {
+                vr::ETrackedPropertyError::InvalidDevice
+            };
+        }
+        0
     }
     fn GetMatrix34TrackedDeviceProperty(
         &self,
@@ -987,11 +1008,11 @@ impl vr::IVRSystem012On014 for System {
 
 impl vr::IVRSystem011On012 for System {
     fn PerformanceTestEnableCapture(&self, _: bool) {
-        todo!()
+        crate::warn_unimplemented!("PerformanceTestEnableCapture (v0.9.15)");
     }
 
     fn PerformanceTestReportFidelityLevelChange(&self, _: i32) {
-        todo!()
+        crate::warn_unimplemented!("PerformanceTestReportFidelityLevelChange (v0.9.15)");
     }
 }
 
@@ -1055,6 +1076,84 @@ mod tests {
     use crate::{clientcore::Injector, openxr_data::OpenXrData};
     use std::ffi::CStr;
     use vr::IVRSystem022_Interface;
+
+    #[test]
+    fn app_container_file_paths_empty() {
+        let system = System::new(
+            Arc::new(OpenXrData::new(&Injector::default()).unwrap()),
+            &Injector::default(),
+        );
+        let mut buf = [1 as std::os::raw::c_char; 4];
+        let get =
+            |buf, size| vr::IVRSystem026_Interface::GetAppContainerFilePaths(&system, buf, size);
+        assert_eq!(get(buf.as_mut_ptr(), buf.len() as u32), 0);
+        assert_eq!(buf[0], 0);
+        assert_eq!(get(std::ptr::null_mut(), 4), 0);
+        assert_eq!(get(std::ptr::null_mut(), 0), 0);
+    }
+
+    #[test]
+    fn firmware_update_and_performance_test_stubs() {
+        let system = System::new(
+            Arc::new(OpenXrData::new(&Injector::default()).unwrap()),
+            &Injector::default(),
+        );
+        assert_eq!(
+            vr::IVRSystem026_Interface::PerformFirmwareUpdate(
+                &system,
+                vr::k_unTrackedDeviceIndex_Hmd
+            ),
+            vr::EVRFirmwareError::Fail
+        );
+        <System as vr::IVRSystem011On012>::PerformanceTestEnableCapture(&system, true);
+        <System as vr::IVRSystem011On012>::PerformanceTestReportFidelityLevelChange(&system, 1);
+    }
+
+    #[test]
+    fn event_type_name() {
+        let system = System::new(
+            Arc::new(OpenXrData::new(&Injector::default()).unwrap()),
+            &Injector::default(),
+        );
+        let get = || {
+            vr::IVRSystem026_Interface::GetEventTypeNameFromEnum(
+                &system,
+                vr::EVREventType::ButtonPress,
+            )
+        };
+        let name = get();
+        assert_eq!(unsafe { CStr::from_ptr(name) }, c"VREvent_ButtonPress");
+        assert_eq!(get(), name);
+    }
+
+    #[test]
+    fn array_tracked_device_property_unknown() {
+        let system = System::new(
+            Arc::new(OpenXrData::new(&Injector::default()).unwrap()),
+            &Injector::default(),
+        );
+        let get = |index| {
+            let mut buf = [0xAAu8; 4];
+            let mut err = vr::ETrackedPropertyError::Success;
+            let len = vr::IVRSystem026_Interface::GetArrayTrackedDeviceProperty(
+                &system,
+                index,
+                vr::ETrackedDeviceProperty::DisplayAvailableFrameRates_Float_Array,
+                vr::k_unFloatPropertyTag,
+                buf.as_mut_ptr().cast(),
+                buf.len() as u32,
+                &mut err,
+            );
+            assert_eq!(len, 0);
+            assert_eq!(buf, [0xAA; 4]);
+            err
+        };
+        assert_eq!(
+            get(vr::k_unTrackedDeviceIndex_Hmd),
+            vr::ETrackedPropertyError::UnknownProperty
+        );
+        assert_eq!(get(1), vr::ETrackedPropertyError::InvalidDevice);
+    }
 
     #[test]
     fn unity_required_properties() {
