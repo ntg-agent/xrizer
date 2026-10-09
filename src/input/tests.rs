@@ -1115,3 +1115,20 @@ fn load_actions_race() {
     let res = f.get_bool_state(boolact);
     assert!(res.is_ok(), "{res:?}");
 }
+
+#[test]
+fn dominant_hand_defaults_to_right() {
+    let f = Fixture::new();
+
+    let mut hand = vr::ETrackedControllerRole::Invalid;
+    assert_eq!(
+        vr::IVRInput011_Interface::GetDominantHand(&*f.input, &mut hand),
+        vr::EVRInputError::None
+    );
+    assert_eq!(hand, vr::ETrackedControllerRole::RightHand);
+
+    assert_eq!(
+        vr::IVRInput011_Interface::GetDominantHand(&*f.input, std::ptr::null_mut()),
+        vr::EVRInputError::InvalidParam
+    );
+}
