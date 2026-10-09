@@ -11,6 +11,7 @@ use openxr_sys as xr;
 use openxr_sys::Handle as _;
 use paste::paste;
 use slotmap::{DefaultKey, Key, KeyData, SlotMap};
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString, c_char};
 use std::sync::{
@@ -162,6 +163,16 @@ pub fn get_suggested_bindings(action: xr::Action, profile: xr::Path) -> Vec<Stri
 pub fn session_frame_state(session: xr::Session) -> FrameState {
     let session = session.to_handle().unwrap();
     session.frame_state.load()
+}
+
+thread_local! {
+    static LOCATE_VIEWS_FAILURE: Cell<Option<xr::Result>> = const { Cell::new(None) };
+}
+
+/// While set to `Some(result)`, every `xrLocateViews` call made on the current thread returns
+/// `result` instead of locating views. Set it back to `None` to make the calls succeed again.
+pub fn set_locate_views_failure(result: Option<xr::Result>) {
+    LOCATE_VIEWS_FAILURE.set(result);
 }
 
 macro_rules! fn_unimplemented_impl {
@@ -1746,6 +1757,9 @@ extern "system" fn locate_views(
     views: *mut xr::View,
 ) -> xr::Result {
     let _session = get_handle!(session);
+    if let Some(result) = LOCATE_VIEWS_FAILURE.get() {
+        return result;
+    }
     if !state.is_null() {
         unsafe {
             state.write(xr::ViewState {

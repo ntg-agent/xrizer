@@ -25,14 +25,65 @@ struct ViewDataViewSpace {
     original_orientations: [Quat; 2],
 }
 
-#[derive(Default)]
-struct ViewCache {
+impl ViewData {
+    /// What we report if the runtime can't locate views and we have no earlier views to fall back
+    /// on: no valid pose (identity, so the eyes sit at the head position and look straight ahead)
+    /// and a symmetric 90 degree field of view, i.e. a raw projection of -1/1 on both axes, like
+    /// the OpenVR driver sample's null HMD. This is a plausible projection that keeps apps from
+    /// dividing by zero or building a degenerate projection matrix.
+    const FALLBACK: Self = Self {
+        flags: xr::ViewStateFlags::EMPTY,
+        views: [xr::View {
+            pose: xr::Posef::IDENTITY,
+            fov: xr::Fovf {
+                angle_left: -std::f32::consts::FRAC_PI_4,
+                angle_right: std::f32::consts::FRAC_PI_4,
+                angle_up: std::f32::consts::FRAC_PI_4,
+                angle_down: -std::f32::consts::FRAC_PI_4,
+            },
+        }; 2],
+    };
+}
+
+impl ViewDataViewSpace {
+    const FALLBACK: Self = Self {
+        data: ViewData::FALLBACK,
+        original_orientations: [Quat::IDENTITY; 2],
+    };
+}
+
+#[derive(Copy, Clone, Default)]
+struct CachedViews {
     view: Option<ViewDataViewSpace>,
     local: Option<ViewData>,
     stage: Option<ViewData>,
 }
 
+impl CachedViews {
+    fn other_space(&mut self, ty: xr::ReferenceSpaceType) -> &mut Option<ViewData> {
+        match ty {
+            xr::ReferenceSpaceType::LOCAL => &mut self.local,
+            xr::ReferenceSpaceType::STAGE => &mut self.stage,
+            other => unreachable!("unexpected reference space type: {other:?}"),
+        }
+    }
+}
+
+#[derive(Default)]
+struct ViewCache {
+    /// Views located since the last call to [`ViewCache::reset`].
+    current: CachedViews,
+    /// The most recent successfully located views of each space. These survive
+    /// [`ViewCache::reset`] and are returned if the runtime fails to locate views.
+    last_good: CachedViews,
+}
+
 impl ViewCache {
+    /// Forgets the cached views, so the next `get_views` locates them again.
+    fn reset(&mut self) {
+        self.current = CachedViews::default();
+    }
+
     fn get_views(
         &mut self,
         session: &SessionData,
@@ -40,40 +91,79 @@ impl ViewCache {
         ty: xr::ReferenceSpaceType,
     ) -> ViewData {
         match ty {
-            xr::ReferenceSpaceType::VIEW => {
-                self.view
-                    .get_or_insert_with(|| Self::get_views_view_space(session, display_time))
-                    .data
-            }
+            xr::ReferenceSpaceType::VIEW => self.get_view_space(session, display_time).data,
             xr::ReferenceSpaceType::LOCAL | xr::ReferenceSpaceType::STAGE => {
-                let view = match ty {
-                    xr::ReferenceSpaceType::LOCAL => &mut self.local,
-                    xr::ReferenceSpaceType::STAGE => &mut self.stage,
-                    _ => unreachable!(),
-                };
+                if let Some(views) = *self.current.other_space(ty) {
+                    return views;
+                }
 
-                *view.get_or_insert_with(|| {
-                    let view_rots = self
-                        .view
-                        .get_or_insert_with(|| Self::get_views_view_space(session, display_time))
-                        .original_orientations;
+                let view_rots = self
+                    .get_view_space(session, display_time)
+                    .original_orientations;
 
-                    Self::get_views_other_space(session, display_time, ty, view_rots)
-                })
+                // Failures aren't cached, so that a later call can still succeed.
+                match Self::get_views_other_space(session, display_time, ty, view_rots) {
+                    Some(views) => {
+                        *self.current.other_space(ty) = Some(views);
+                        *self.last_good.other_space(ty) = Some(views);
+                        views
+                    }
+                    None => (*self.last_good.other_space(ty)).unwrap_or(ViewData::FALLBACK),
+                }
             }
             other => panic!("unexpected reference space type: {other:?}"),
         }
     }
 
-    fn get_views_view_space(session: &SessionData, display_time: xr::Time) -> ViewDataViewSpace {
-        let (flags, mut views) = session
+    fn get_view_space(
+        &mut self,
+        session: &SessionData,
+        display_time: xr::Time,
+    ) -> ViewDataViewSpace {
+        if let Some(views) = self.current.view {
+            return views;
+        }
+
+        // Failures aren't cached, so that a later call can still succeed.
+        match Self::get_views_view_space(session, display_time) {
+            Some(views) => {
+                self.current.view = Some(views);
+                self.last_good.view = Some(views);
+                views
+            }
+            None => self.last_good.view.unwrap_or(ViewDataViewSpace::FALLBACK),
+        }
+    }
+
+    /// Locates the views in the given space. If the runtime fails to, logs the error once and
+    /// returns `None`, so the caller can fall back to older views.
+    fn locate_views(
+        session: &SessionData,
+        display_time: xr::Time,
+        ty: xr::ReferenceSpaceType,
+    ) -> Option<(xr::ViewStateFlags, Vec<xr::View>)> {
+        session
             .session
             .locate_views(
                 xr::ViewConfigurationType::PRIMARY_STEREO,
                 display_time,
-                session.get_space_from_type(xr::ReferenceSpaceType::VIEW),
+                session.get_space_from_type(ty),
             )
-            .expect("Couldn't locate views");
+            .inspect_err(|e| {
+                crate::warn_once!(
+                    "Couldn't locate views: {:?}. Using older or default views.",
+                    e
+                )
+            })
+            .ok()
+    }
+
+    fn get_views_view_space(
+        session: &SessionData,
+        display_time: xr::Time,
+    ) -> Option<ViewDataViewSpace> {
+        let (flags, mut views) =
+            Self::locate_views(session, display_time, xr::ReferenceSpaceType::VIEW)?;
 
         let original_orientations = views
             .iter_mut()
@@ -91,7 +181,7 @@ impl ViewCache {
             .try_into()
             .unwrap();
 
-        ViewDataViewSpace {
+        Some(ViewDataViewSpace {
             data: ViewData {
                 flags,
                 views: views
@@ -99,7 +189,7 @@ impl ViewCache {
                     .unwrap_or_else(|v: Vec<xr::View>| panic!("Expected 2 views, got {}", v.len())),
             },
             original_orientations,
-        }
+        })
     }
 
     fn get_views_other_space(
@@ -107,15 +197,8 @@ impl ViewCache {
         display_time: xr::Time,
         ty: xr::ReferenceSpaceType,
         view_data_orientations_inverse: [Quat; 2],
-    ) -> ViewData {
-        let (flags, mut views) = session
-            .session
-            .locate_views(
-                xr::ViewConfigurationType::PRIMARY_STEREO,
-                display_time,
-                session.get_space_from_type(ty),
-            )
-            .expect("Couldn't locate views");
+    ) -> Option<ViewData> {
+        let (flags, mut views) = Self::locate_views(session, display_time, ty)?;
 
         for (
             xr::View {
@@ -139,11 +222,109 @@ impl ViewCache {
             };
         }
 
-        ViewData {
+        Some(ViewData {
             flags,
             views: views
                 .try_into()
                 .unwrap_or_else(|v: Vec<xr::View>| panic!("Expected 2 views, got {}", v.len())),
+        })
+    }
+}
+
+#[cfg(test)]
+mod view_cache_tests {
+    use super::*;
+    use crate::{clientcore::Injector, openxr_data::OpenXrData};
+    use vr::IVRSystem022_Interface;
+
+    // The fake runtime reports a zero FOV for both eyes, which is distinguishable from the
+    // fallback FOV used when xrLocateViews fails.
+    const FAKEXR_PROJECTION: [f32; 4] = [0.0; 4];
+    const DEFAULT_PROJECTION: [f32; 4] = [-1.0, 1.0, -1.0, 1.0];
+
+    fn system() -> System {
+        let xr = Arc::new(OpenXrData::new(&Injector::default()).unwrap());
+        System::new(xr, &Injector::default())
+    }
+
+    fn fail_locate_views(fail: bool) {
+        fakexr::set_locate_views_failure(fail.then_some(xr::sys::Result::ERROR_TIME_INVALID));
+    }
+
+    fn projection_raw(system: &System, eye: vr::EVREye) -> [f32; 4] {
+        let [mut left, mut right, mut top, mut bottom] = [0.0; 4];
+        system.GetProjectionRaw(eye, &mut left, &mut right, &mut top, &mut bottom);
+        [left, right, top, bottom]
+    }
+
+    #[track_caller]
+    fn assert_projection(actual: [f32; 4], expected: [f32; 4]) {
+        assert!(
+            actual
+                .iter()
+                .zip(expected)
+                .all(|(a, e)| (a - e).abs() < 1e-5),
+            "got {actual:?}, expected {expected:?}"
+        );
+    }
+
+    #[track_caller]
+    fn assert_eye_to_head_identity(system: &System, eye: vr::EVREye) {
+        let m = system.GetEyeToHeadTransform(eye).m;
+        assert_eq!(
+            m,
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0]
+            ]
+        );
+    }
+
+    #[test]
+    fn locate_views_failure_without_previous_views_uses_defaults() {
+        let system = system();
+
+        fail_locate_views(true);
+        for eye in [vr::EVREye::Left, vr::EVREye::Right] {
+            assert_projection(projection_raw(&system, eye), DEFAULT_PROJECTION);
+            assert_eye_to_head_identity(&system, eye);
+        }
+
+        // The defaults must not stick around once the runtime can locate views again.
+        fail_locate_views(false);
+        assert_projection(projection_raw(&system, vr::EVREye::Left), FAKEXR_PROJECTION);
+    }
+
+    #[test]
+    fn locate_views_failure_in_other_space_uses_defaults() {
+        let system = system();
+
+        // Locate (and cache) the view space views only.
+        assert_eye_to_head_identity(&system, vr::EVREye::Left);
+
+        fail_locate_views(true);
+        assert_projection(
+            projection_raw(&system, vr::EVREye::Left),
+            DEFAULT_PROJECTION,
+        );
+
+        fail_locate_views(false);
+        assert_projection(projection_raw(&system, vr::EVREye::Left), FAKEXR_PROJECTION);
+    }
+
+    #[test]
+    fn locate_views_failure_keeps_previous_views() {
+        let system = system();
+
+        assert_projection(projection_raw(&system, vr::EVREye::Left), FAKEXR_PROJECTION);
+
+        // This is what WaitGetPoses does at the start of every frame.
+        fail_locate_views(true);
+        system.reset_views();
+        for eye in [vr::EVREye::Left, vr::EVREye::Right] {
+            assert_projection(projection_raw(&system, eye), FAKEXR_PROJECTION);
+            assert_eye_to_head_identity(&system, eye);
         }
     }
 }
@@ -175,7 +356,7 @@ impl System {
     }
 
     pub fn reset_views(&self) {
-        std::mem::take(&mut *self.views.lock().unwrap());
+        self.views.lock().unwrap().reset();
         let session = self.openxr.session_data.get();
         let display_time = self.openxr.display_time.get();
         let mut views = self.views.lock().unwrap();
