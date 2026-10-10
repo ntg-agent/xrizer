@@ -228,7 +228,13 @@ impl IVRClientCore003_Interface for ClientCore {
         }
 
         let openxr = self.openxr.read().unwrap();
-        let openxr = openxr.as_ref().unwrap();
+        let Some(openxr) = openxr.as_ref() else {
+            error!("Application requested interface {interface:?} without a successful Init");
+            if !error.is_null() {
+                unsafe { *error = vr::EVRInitError::Init_NotInitialized };
+            }
+            return std::ptr::null_mut();
+        };
 
         self.try_interface(interface, |injector| System::new(openxr.clone(), injector))
             .or_else(|| {
@@ -435,6 +441,39 @@ mod tests {
         let core = ClientCore::new(c"IVRClientCore_003").unwrap();
         core.clone().Cleanup();
         assert!(core.openxr.read().unwrap().is_none());
+    }
+
+    #[test]
+    fn generic_interface_requires_init() {
+        let core = ClientCore::new(c"IVRClientCore_003").unwrap();
+        let get = || {
+            let mut err = vr::EVRInitError::None;
+            let interface = core.GetGenericInterface(c"IVRSystem_022".as_ptr(), &mut err);
+            (interface, err)
+        };
+
+        let (interface, err) = get();
+        assert!(interface.is_null());
+        assert_eq!(err, vr::EVRInitError::Init_NotInitialized);
+        // The error is optional.
+        assert!(
+            core.GetGenericInterface(c"IVRSystem_022".as_ptr(), std::ptr::null_mut())
+                .is_null()
+        );
+
+        assert_eq!(
+            core.clone()
+                .Init(vr::EVRApplicationType::Scene, std::ptr::null()),
+            vr::EVRInitError::None
+        );
+        let (interface, err) = get();
+        assert!(!interface.is_null());
+        assert_eq!(err, vr::EVRInitError::None);
+
+        core.clone().Cleanup();
+        let (interface, err) = get();
+        assert!(interface.is_null());
+        assert_eq!(err, vr::EVRInitError::Init_NotInitialized);
     }
 
     #[test]
