@@ -56,20 +56,61 @@ impl vr::IVRChaperone004_Interface for Chaperone {
     }
     fn GetPlayAreaRect(&self, rect: *mut vr::HmdQuad_t) -> bool {
         crate::warn_unimplemented!("GetPlayAreaRect");
-        unsafe {
+        if let Some(rect) = unsafe { rect.as_mut() } {
             *rect = Default::default();
         }
         false
     }
     fn GetPlayAreaSize(&self, size_x: *mut f32, size_z: *mut f32) -> bool {
         crate::warn_unimplemented!("GetPlayAreaSize");
-        unsafe {
+        if let Some(size_x) = unsafe { size_x.as_mut() } {
             *size_x = 1.0;
+        }
+        if let Some(size_z) = unsafe { size_z.as_mut() } {
             *size_z = 1.0;
-        };
+        }
         true
     }
     fn GetCalibrationState(&self) -> vr::ChaperoneCalibrationState {
         vr::ChaperoneCalibrationState::OK
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{clientcore::Injector, openxr_data::OpenXrData};
+    use std::ptr::null_mut;
+    use vr::IVRChaperone004_Interface;
+
+    fn chaperone() -> Chaperone {
+        Chaperone::new(Arc::new(OpenXrData::new(&Injector::default()).unwrap()))
+    }
+
+    #[test]
+    fn play_area_rect() {
+        let c = chaperone();
+        let mut rect = vr::HmdQuad_t::default();
+        rect.vCorners[0].v = [1.0; 3];
+        assert!(!c.GetPlayAreaRect(&mut rect));
+        assert_eq!(rect.vCorners[0].v, [0.0; 3]);
+        // The output is required, but the call must survive without it.
+        assert!(!c.GetPlayAreaRect(null_mut()));
+    }
+
+    #[test]
+    fn play_area_size() {
+        let c = chaperone();
+        let (mut x, mut z) = (0.0, 0.0);
+        assert!(c.GetPlayAreaSize(&mut x, &mut z));
+        assert_eq!((x, z), (1.0, 1.0));
+
+        // Each output is optional.
+        (x, z) = (0.0, 0.0);
+        assert!(c.GetPlayAreaSize(&mut x, null_mut()));
+        assert_eq!((x, z), (1.0, 0.0));
+        assert!(c.GetPlayAreaSize(null_mut(), &mut z));
+        assert_eq!(z, 1.0);
+        assert!(c.GetPlayAreaSize(null_mut(), null_mut()));
     }
 }
