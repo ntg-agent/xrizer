@@ -114,20 +114,14 @@ impl InteractionProfile for ReverbG2Controller {
         }
     }
 
-    fn offset_grip_pose(hand: Hand) -> Mat4 {
-        // From Monado
+    fn offset_grip_pose(_: Hand) -> Mat4 {
+        // SteamVR's transform of the G2 controller's grip relative to its raw pose, as carried in
+        // OpenComposite's Reverb G2 interaction profile. Not verified on hardware.
         Mat4::from_rotation_translation(
-            Quat::from_xyzw(0.300705, 0.000000, 0.000000, 0.953717),
-            Vec3::new(
-                0.000683
-                    * match hand {
-                        Hand::Left => 1.0,
-                        Hand::Right => -1.0,
-                    },
-                -0.015332,
-                0.068270,
-            ),
+            Quat::from_rotation_x((-5.04_f32).to_radians()),
+            Vec3::new(0.0, -0.00553, 0.09689),
         )
+        .inverse()
     }
 }
 
