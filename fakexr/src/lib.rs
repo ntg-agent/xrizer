@@ -169,6 +169,7 @@ thread_local! {
     static LOCATE_VIEWS_FAILURE: Cell<Option<xr::Result>> = const { Cell::new(None) };
     static FAIL_NEXT_SWAPCHAIN_CREATE: Cell<Option<xr::Result>> = const { Cell::new(None) };
     static FAIL_NEXT_SWAPCHAIN_ACQUIRE: Cell<Option<xr::Result>> = const { Cell::new(None) };
+    static USER_PRESENCE_SUPPORTED: Cell<bool> = const { Cell::new(true) };
 }
 
 /// While set to `Some(result)`, every `xrLocateViews` call made on the current thread returns
@@ -187,6 +188,29 @@ pub fn fail_next_swapchain_create(result: xr::Result) {
 /// acquiring an image. The failure is consumed by that call, so later calls succeed again.
 pub fn fail_next_swapchain_acquire(result: xr::Result) {
     FAIL_NEXT_SWAPCHAIN_ACQUIRE.set(Some(result));
+}
+
+/// Sets whether `xrGetSystemProperties` reports `supportsUserPresence` for calls made on the
+/// current thread. Defaults to true. Remember to set it back to true after creating the instance
+/// if the thread goes on to create more instances.
+pub fn set_user_presence_supported(supported: bool) {
+    USER_PRESENCE_SUPPORTED.set(supported);
+}
+
+/// Queues an `XrEventDataUserPresenceChangedEXT` event.
+pub fn set_user_presence(session: xr::Session, is_user_present: bool) {
+    let session_handle = session;
+    let session = session.to_handle().unwrap();
+    send_event(
+        &session.event_sender,
+        xr::EventDataUserPresenceChangedEXT {
+            ty: xr::EventDataUserPresenceChangedEXT::TYPE,
+            next: std::ptr::null(),
+            session: session_handle,
+            is_user_present: is_user_present.into(),
+        },
+        None,
+    );
 }
 
 macro_rules! fn_unimplemented_impl {
@@ -317,7 +341,7 @@ pub unsafe extern "system" fn get_instance_proc_addr(
                     (ResultToString),
                     (StructureTypeToString),
                     (GetInstanceProperties),
-                    (GetSystemProperties),
+                    GetSystemProperties,
                     CreateSwapchain,
                     DestroySwapchain,
                     EnumerateSwapchainImages,
@@ -382,8 +406,8 @@ extern "system" fn enumerate_instance_extension_properties(
     properties: *mut xr::ExtensionProperties,
 ) -> xr::Result {
     assert!(layer_name.is_null());
-    unsafe { *property_count_output = 4 };
-    if property_capacity_input >= 4 {
+    unsafe { *property_count_output = 5 };
+    if property_capacity_input >= 5 {
         let props =
             unsafe { std::slice::from_raw_parts_mut(properties, property_capacity_input as usize) };
 
@@ -430,6 +454,17 @@ extern "system" fn enumerate_instance_extension_properties(
         let name =
             unsafe { std::slice::from_raw_parts(name.as_ptr() as *const c_char, name.len()) };
         props[3].extension_name[..name.len()].copy_from_slice(name);
+
+        props[4] = xr::ExtensionProperties {
+            ty: xr::ExtensionProperties::TYPE,
+            next: std::ptr::null_mut(),
+            extension_name: [0 as c_char; xr::MAX_EXTENSION_NAME_SIZE],
+            extension_version: 1,
+        };
+        let name = xr::EXT_USER_PRESENCE_EXTENSION_NAME;
+        let name =
+            unsafe { std::slice::from_raw_parts(name.as_ptr() as *const c_char, name.len()) };
+        props[4].extension_name[..name.len()].copy_from_slice(name);
     }
     xr::Result::SUCCESS
 }
@@ -1119,6 +1154,42 @@ extern "system" fn get_system(
     system_id: *mut xr::SystemId,
 ) -> xr::Result {
     unsafe { *system_id = xr::SystemId::from_raw(1) };
+    xr::Result::SUCCESS
+}
+
+extern "system" fn get_system_properties(
+    _: xr::Instance,
+    system_id: xr::SystemId,
+    properties: *mut xr::SystemProperties,
+) -> xr::Result {
+    // Only `ty` and `next` are initialized in the struct we're handed.
+    let mut next = unsafe { (&raw const (*properties).next).read() };
+    unsafe {
+        properties.write(xr::SystemProperties {
+            ty: xr::SystemProperties::TYPE,
+            next,
+            system_id,
+            vendor_id: 0,
+            system_name: [0; xr::MAX_SYSTEM_NAME_SIZE],
+            graphics_properties: Default::default(),
+            tracking_properties: Default::default(),
+        });
+    }
+
+    // Go through raw pointers throughout, since each struct in the chain is bigger than the
+    // BaseOutStructure header that we use to walk it.
+    while !next.is_null() {
+        let header = next.cast::<xr::BaseOutStructure>();
+        if unsafe { (&raw const (*header).ty).read() } == xr::SystemUserPresencePropertiesEXT::TYPE
+        {
+            let presence = next.cast::<xr::SystemUserPresencePropertiesEXT>();
+            unsafe {
+                (&raw mut (*presence).supports_user_presence)
+                    .write(USER_PRESENCE_SUPPORTED.get().into());
+            }
+        }
+        next = unsafe { (&raw const (*header).next).read() }.cast();
+    }
     xr::Result::SUCCESS
 }
 
