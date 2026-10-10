@@ -248,17 +248,37 @@ pub unsafe extern "C" fn VRClientCoreFactory(
 }
 
 /// Needed for Proton, but seems unused.
+///
+/// # Safety
+///
+/// return_code must be null or valid
 #[unsafe(no_mangle)]
-pub extern "C" fn HmdSystemFactory(
+pub unsafe extern "C" fn HmdSystemFactory(
     _interface_name: *const c_char,
-    _return_code: *mut i32,
+    return_code: *mut i32,
 ) -> *mut c_void {
-    unimplemented!()
+    warn_unimplemented!("HmdSystemFactory");
+    if let Some(return_code) = unsafe { return_code.as_mut() } {
+        *return_code = vr::EVRInitError::Init_InterfaceNotFound as i32;
+    }
+    std::ptr::null_mut()
 }
 
 #[cfg(test)]
 mod tests {
     use super::is_runtime_lost;
+
+    #[test]
+    fn hmd_system_factory_has_no_interfaces() {
+        let mut code = 0;
+        let interface = unsafe { super::HmdSystemFactory(c"IVRSystem_009".as_ptr(), &mut code) };
+        assert!(interface.is_null());
+        assert_eq!(code, openvr::EVRInitError::Init_InterfaceNotFound as i32);
+        // The return code is optional.
+        let interface =
+            unsafe { super::HmdSystemFactory(c"IVRSystem_009".as_ptr(), std::ptr::null_mut()) };
+        assert!(interface.is_null());
+    }
 
     #[test]
     fn is_runtime_lost_matches_instance_lost() {

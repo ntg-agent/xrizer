@@ -1737,3 +1737,304 @@ fn unimplemented_getters_write_neutral_outputs() {
         ok
     );
 }
+
+#[test]
+fn origin_tracked_device_info_bad_params() {
+    let f = Fixture::new();
+    let left = f.get_input_source_handle(c"/user/hand/left");
+    let other = f.get_input_source_handle(c"/user/hand/gamepad");
+    let size = std::mem::size_of::<vr::InputOriginInfo_t>() as u32;
+    let get = |origin, info, size| f.input.GetOriginTrackedDeviceInfo(origin, info, size);
+
+    let sentinel = vr::InputOriginInfo_t {
+        trackedDeviceIndex: 0x55,
+        ..Default::default()
+    };
+    let mut info = sentinel;
+    // a struct of another size is not ours to fill in
+    for wrong_size in [0, size - 1, size + 1] {
+        assert_eq!(
+            get(left, &mut info, wrong_size),
+            vr::EVRInputError::InvalidParam
+        );
+    }
+    // neither is a null one, for a known or unknown source
+    for origin in [left, other] {
+        assert_eq!(
+            get(origin, std::ptr::null_mut(), size),
+            vr::EVRInputError::InvalidParam
+        );
+    }
+    assert_eq!(info.trackedDeviceIndex, sentinel.trackedDeviceIndex);
+
+    assert_eq!(get(left, &mut info, size), vr::EVRInputError::None);
+    assert_eq!(info.trackedDeviceIndex, Hand::Left as u32);
+}
+
+#[test]
+fn skeletal_bone_data_bad_params() {
+    let f = Fixture::new();
+    f.load_actions(c"actions.json");
+    let skeleton = f.get_action_handle(c"/actions/set1/in/SkellyR");
+
+    let mut bones = [vr::VRBoneTransform_t::default(); 33];
+    bones.iter_mut().for_each(|b| b.position.v = [9.0; 4]);
+    let get = |bones: *mut vr::VRBoneTransform_t, count| {
+        vr::IVRInput011_Interface::GetSkeletalBoneData(
+            &*f.input,
+            skeleton,
+            vr::EVRSkeletalTransformSpace::Parent,
+            vr::EVRSkeletalMotionRange::WithController,
+            bones,
+            count,
+        )
+    };
+
+    assert_eq!(
+        get(std::ptr::null_mut(), 31),
+        vr::EVRInputError::InvalidParam
+    );
+    assert_eq!(
+        get(std::ptr::null_mut(), 0),
+        vr::EVRInputError::BufferTooSmall
+    );
+    assert_eq!(
+        get(bones.as_mut_ptr(), 30),
+        vr::EVRInputError::BufferTooSmall
+    );
+    assert!(bones.iter().all(|b| b.position.v == [9.0; 4]));
+
+    // a larger array is fine, but only the skeleton's bones are written
+    assert_eq!(get(bones.as_mut_ptr(), 33), vr::EVRInputError::None);
+    assert!(bones[..31].iter().all(|b| b.position.v != [9.0; 4]));
+    assert!(bones[31..].iter().all(|b| b.position.v == [9.0; 4]));
+}
+
+#[test]
+fn skeletal_reference_transforms_bad_params() {
+    let f = Fixture::new();
+    f.load_actions(c"actions.json");
+    let skeleton = f.get_action_handle(c"/actions/set1/in/SkellyL");
+    let boolact = f.get_action_handle(c"/actions/set1/in/boolact");
+
+    let mut bones = [vr::VRBoneTransform_t::default(); 33];
+    bones.iter_mut().for_each(|b| b.position.v = [9.0; 4]);
+    let get = |action, bones: *mut vr::VRBoneTransform_t, count| {
+        vr::IVRInput011_Interface::GetSkeletalReferenceTransforms(
+            &*f.input,
+            action,
+            vr::EVRSkeletalTransformSpace::Model,
+            vr::EVRSkeletalReferencePose::OpenHand,
+            bones,
+            count,
+        )
+    };
+
+    // too few entries: nothing is written
+    for count in [0, 1, 30] {
+        assert_eq!(
+            get(skeleton, bones.as_mut_ptr(), count),
+            vr::EVRInputError::BufferTooSmall
+        );
+    }
+    assert_eq!(
+        get(skeleton, std::ptr::null_mut(), 31),
+        vr::EVRInputError::InvalidParam
+    );
+    assert_eq!(
+        get(boolact, bones.as_mut_ptr(), 31),
+        vr::EVRInputError::WrongType
+    );
+    assert!(bones.iter().all(|b| b.position.v == [9.0; 4]));
+
+    // a larger array is fine, but only the skeleton's bones are written
+    assert_eq!(
+        get(skeleton, bones.as_mut_ptr(), 33),
+        vr::EVRInputError::None
+    );
+    assert!(bones[..31].iter().all(|b| b.position.v != [9.0; 4]));
+    assert!(bones[31..].iter().all(|b| b.position.v == [9.0; 4]));
+}
+
+/// The size of an action data struct must match ours and the struct must exist.
+#[track_caller]
+fn check_action_data_params<T: Default + std::fmt::Debug>(
+    get: impl Fn(*mut T, u32) -> vr::EVRInputError,
+) {
+    let size = std::mem::size_of::<T>() as u32;
+    let mut data = T::default();
+    let before = format!("{data:?}");
+    for wrong_size in [0, size - 1, size + 1] {
+        assert_eq!(
+            get(&mut data, wrong_size),
+            vr::EVRInputError::InvalidParam,
+            "size {wrong_size}"
+        );
+    }
+    assert_eq!(
+        get(std::ptr::null_mut(), size),
+        vr::EVRInputError::InvalidParam
+    );
+    assert_eq!(format!("{data:?}"), before);
+    assert_eq!(get(&mut data, size), vr::EVRInputError::None);
+}
+
+#[test]
+fn pose_action_data_bad_params() {
+    let f = Fixture::new();
+    f.load_actions(c"actions.json");
+    let pose = f.get_action_handle(c"/actions/set1/in/pose");
+    let origin = vr::ETrackingUniverseOrigin::Seated;
+
+    check_action_data_params::<vr::InputPoseActionData_t>(|data, size| {
+        f.input
+            .GetPoseActionDataForNextFrame(pose, origin, data, size, 0)
+    });
+    check_action_data_params::<vr::InputPoseActionData_t>(|data, size| {
+        f.input
+            .GetPoseActionDataRelativeToNow(pose, origin, 0.0, data, size, 0)
+    });
+}
+
+#[test]
+fn analog_action_data_bad_params() {
+    let f = Fixture::new();
+    f.load_actions(c"actions.json");
+    let analog = f.get_action_handle(c"/actions/set1/in/vec1act");
+
+    check_action_data_params::<vr::InputAnalogActionData_t>(|data, size| {
+        f.input.GetAnalogActionData(analog, data, size, 0)
+    });
+}
+
+#[test]
+fn digital_action_data_bad_params() {
+    let f = Fixture::new();
+    f.load_actions(c"actions.json");
+    let digital = f.get_action_handle(c"/actions/set1/in/boolact");
+
+    check_action_data_params::<vr::InputDigitalActionData_t>(|data, size| {
+        f.input.GetDigitalActionData(digital, data, size, 0)
+    });
+}
+
+#[test]
+fn update_action_state_bad_params() {
+    let f = Fixture::new();
+    f.load_actions(c"actions.json");
+    let set1 = f.get_action_set_handle(c"/actions/set1");
+    let size = std::mem::size_of::<vr::VRActiveActionSet_t>() as u32;
+    let mut active = vr::VRActiveActionSet_t {
+        ulActionSet: set1,
+        ..Default::default()
+    };
+
+    for wrong_size in [0, size - 1, size + 1] {
+        assert_eq!(
+            f.input.UpdateActionState(&mut active, wrong_size, 1),
+            vr::EVRInputError::InvalidParam,
+            "size {wrong_size}"
+        );
+    }
+    // a count without an array
+    assert_eq!(
+        f.input.UpdateActionState(std::ptr::null_mut(), size, 1),
+        vr::EVRInputError::InvalidParam
+    );
+    // no sets to activate is its own error, with or without an array
+    assert_eq!(
+        f.input.UpdateActionState(std::ptr::null_mut(), size, 0),
+        vr::EVRInputError::NoActiveActionSet
+    );
+    assert_eq!(
+        f.input.UpdateActionState(&mut active, size, 0),
+        vr::EVRInputError::NoActiveActionSet
+    );
+
+    assert_eq!(
+        f.input.UpdateActionState(&mut active, size, 1),
+        vr::EVRInputError::None
+    );
+}
+
+#[test]
+fn set_action_manifest_path_twice() {
+    let f = Fixture::new();
+    let path = |file: &CStr| [ACTIONS_JSONS_DIR.to_bytes(), file.to_bytes_with_nul()].concat();
+    let set = |file| f.input.SetActionManifestPath(path(file).as_ptr() as _);
+
+    assert_eq!(set(c"actions.json"), vr::EVRInputError::None);
+    // the same manifest again is fine
+    assert_eq!(set(c"actions.json"), vr::EVRInputError::None);
+    // another one is not, and must not unload the first
+    assert_eq!(
+        set(c"actions_cased.json"),
+        vr::EVRInputError::MismatchedActionManifest
+    );
+    assert_eq!(set(c"actions.json"), vr::EVRInputError::None);
+    f.get_action::<bool>(f.get_action_handle(c"/actions/set1/in/boolact"));
+}
+
+#[test]
+fn malformed_action_names_are_skipped() {
+    let f = Fixture::new();
+    f.load_actions(c"actions_malformed_names.json");
+
+    // The actions around the ones with a name that isn't /actions/<set>/<in|out>/<name> are loaded.
+    for name in [c"/actions/default/in/use", c"/actions/default/in/after"] {
+        f.get_action::<bool>(f.get_action_handle(name));
+    }
+    for name in [c"not-a-path", c"/actions/default"] {
+        assert_eq!(
+            f.get_bool_state(f.get_action_handle(name)).unwrap_err(),
+            vr::EVRInputError::InvalidHandle
+        );
+    }
+}
+
+#[test]
+fn duplicate_action_names_are_skipped() {
+    let f = Fixture::new();
+    f.load_actions(c"actions_duplicate_names.json");
+
+    // OpenXR action names are only the last part of the path, so the second foo can't be created.
+    f.get_action::<bool>(f.get_action_handle(c"/actions/default/in/foo"));
+    f.get_action::<bool>(f.get_action_handle(c"/actions/default/in/after"));
+    let vibration = f.get_action_handle(c"/actions/default/out/foo");
+    assert_eq!(
+        f.input
+            .TriggerHapticVibrationAction(vibration, 0.0, 0.1, 100.0, 1.0, 0),
+        vr::EVRInputError::InvalidHandle
+    );
+}
+
+#[test]
+fn bindings_for_outputs_of_the_wrong_kind_are_skipped() {
+    let f = Fixture::new();
+    // The binding file binds the boolean action "use" as a haptic output, as a pose and as a skeleton,
+    // and a double tap to something that isn't an action path.
+    // Those must be skipped without preventing the valid bindings for the other actions.
+    f.load_actions(c"actions_output_mismatch.json");
+
+    let path = Knuckles::profile_path();
+    f.verify_bindings::<bool>(
+        path,
+        c"/actions/default/in/use",
+        ["/user/hand/left/input/trigger/touch".into()],
+    );
+    f.verify_bindings::<xr::Haptic>(
+        path,
+        c"/actions/default/out/buzz",
+        ["/user/hand/left/output/haptic".into()],
+    );
+    assert!(
+        f.get_pose(f.get_action_handle(c"/actions/default/in/hand"), 0)
+            .is_ok()
+    );
+    let skel = f.get_action_handle(c"/actions/default/in/skel");
+    let mut count = 0;
+    assert_eq!(
+        vr::IVRInput011_Interface::GetBoneCount(&*f.input, skel, &mut count),
+        vr::EVRInputError::None
+    );
+}

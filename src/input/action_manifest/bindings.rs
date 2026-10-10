@@ -53,18 +53,20 @@ pub struct ActionPath {
 }
 
 impl ActionPath {
+    /// Whether this is a path of the form `/actions/<set>/<in|out>/<name>`, which is what
+    /// [`Self::action_set_name`] needs.
+    pub fn is_well_formed(&self) -> bool {
+        self.path.matches('/').count() >= 3
+    }
+
     /// Returns just the action name - the end part of the path - cleaned
     /// so that it's compatible with the OpenXR path semantics
     /// See Section 6.2 (Well-Formed Path Strings) of the OpenXR spec
     pub fn cleaned_name(&self) -> String {
-        self.path
-            .rsplit_once('/')
-            .expect("Action path missing slash?")
-            .1
-            .replace(
-                |c| !matches!(c, 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '/'),
-                "_",
-            )
+        self.path.rsplit('/').next().unwrap_or(&self.path).replace(
+            |c| !matches!(c, 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '/'),
+            "_",
+        )
     }
 
     pub fn action_set_name(&self) -> &str {
@@ -1014,8 +1016,8 @@ pub fn handle_skeleton_bindings(
                     );
                 }
             }
-            _ => panic!(
-                "Expected skeleton action for skeleton binding {}",
+            _ => warn!(
+                "Expected skeleton action for skeleton binding {}, skipping",
                 output.path
             ),
         }
@@ -1039,14 +1041,16 @@ pub fn handle_haptic_bindings(
             continue;
         };
 
-        assert!(
-            matches!(
-                &context.actions[&output.path],
-                crate::input::ActionData::Haptic(_)
-            ),
-            "expected haptic action for haptic binding {path}, got {}",
-            output.path
-        );
+        if !matches!(
+            &context.actions[&output.path],
+            crate::input::ActionData::Haptic(_)
+        ) {
+            warn!(
+                "expected haptic action for haptic binding {path}, got {}",
+                output.path
+            );
+            continue;
+        }
         let xr_path = instance.string_to_path(path).unwrap();
         context.push_binding(output.path.clone(), xr_path);
     }
@@ -1062,14 +1066,13 @@ pub fn handle_pose_bindings(context: &mut BindingsProfileLoadContext, bindings: 
             continue;
         };
 
-        assert!(
-            matches!(
-                context.actions.get_mut(&output.path).unwrap(),
-                ActionData::Pose
-            ),
-            "Expected pose action for pose binding on {}",
-            output.path
-        );
+        if !matches!(&context.actions[&output.path], ActionData::Pose) {
+            warn!(
+                "Expected pose action for pose binding on {}, skipping",
+                output.path
+            );
+            continue;
+        }
 
         let bound = context
             .pose_bindings

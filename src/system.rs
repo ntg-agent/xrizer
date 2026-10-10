@@ -565,11 +565,9 @@ impl vr::IVRSystem026_Interface for System {
         };
 
         if self.GetControllerState(device_index, state, state_size) {
-            unsafe {
-                *pose.as_mut().unwrap() = self
-                    .input
-                    .get()
-                    .unwrap()
+            // The pose is optional.
+            if let Some(pose) = unsafe { pose.as_mut() } {
+                *pose = input
                     .get_controller_pose(hand, Some(origin))
                     .unwrap_or_default();
             }
@@ -1081,6 +1079,9 @@ impl vr::IVRSystem026_Interface for System {
         pose_array: *mut vr::TrackedDevicePose_t,
         pose_count: u32,
     ) {
+        if pose_array.is_null() {
+            return;
+        }
         self.input
             .force(|_| Input::new(self.openxr.clone()))
             .get_poses(
@@ -1145,10 +1146,16 @@ impl vr::IVRSystem019On020 for System {
         &self,
         _un_device_index: vr::TrackedDeviceIndex_t,
         _pch_request: *const std::os::raw::c_char,
-        _pch_response_buffer: *mut std::os::raw::c_char,
-        _un_response_buffer_size: u32,
+        response_buffer: *mut std::os::raw::c_char,
+        response_buffer_size: u32,
     ) -> u32 {
-        unimplemented!()
+        crate::warn_unimplemented!("DriverDebugRequest (v1.0.17)");
+        // There is no driver to answer, so the response is an empty string, whose size with the
+        // terminating null is 1.
+        if !response_buffer.is_null() && response_buffer_size > 0 {
+            unsafe { response_buffer.write(0) };
+        }
+        1
     }
 }
 
@@ -1423,6 +1430,89 @@ mod tests {
         test_prop(vr::ETrackedDeviceProperty::SerialNumber_String);
         test_prop(vr::ETrackedDeviceProperty::ManufacturerName_String);
         test_prop(vr::ETrackedDeviceProperty::ControllerType_String);
+    }
+
+    #[test]
+    fn driver_debug_request_has_no_response() {
+        let system = System::new(
+            Arc::new(OpenXrData::new(&Injector::default()).unwrap()),
+            &Injector::default(),
+        );
+        let request = |buf: *mut std::os::raw::c_char, size| {
+            <System as vr::IVRSystem019On020>::DriverDebugRequest(
+                &system,
+                vr::k_unTrackedDeviceIndex_Hmd,
+                c"anything".as_ptr(),
+                buf,
+                size,
+            )
+        };
+
+        // The response is an empty string, which takes one byte with the terminating null.
+        let mut buf = [0x55 as std::os::raw::c_char; 4];
+        assert_eq!(request(buf.as_mut_ptr(), buf.len() as u32), 1);
+        assert_eq!(buf, [0, 0x55, 0x55, 0x55]);
+        assert_eq!(request(std::ptr::null_mut(), 0), 1);
+        let mut buf = [0x55 as std::os::raw::c_char; 1];
+        assert_eq!(request(buf.as_mut_ptr(), 0), 1);
+        assert_eq!(buf, [0x55]);
+    }
+
+    #[test]
+    fn device_poses_null_array() {
+        let system = System::new(
+            Arc::new(OpenXrData::new(&Injector::default()).unwrap()),
+            &Injector::default(),
+        );
+        let seated = vr::ETrackingUniverseOrigin::Seated;
+        let get = |poses: *mut vr::TrackedDevicePose_t, count| {
+            vr::IVRSystem026_Interface::GetDeviceToAbsoluteTrackingPose(
+                &system, seated, 0.0, poses, count,
+            )
+        };
+
+        // There is nothing to write to.
+        get(std::ptr::null_mut(), 0);
+        get(std::ptr::null_mut(), vr::k_unMaxTrackedDeviceCount);
+
+        let mut poses = [vr::TrackedDevicePose_t::default(); 2];
+        get(poses.as_mut_ptr(), poses.len() as u32);
+        assert!(poses[0].bDeviceIsConnected);
+        assert!(!poses[1].bDeviceIsConnected);
+    }
+
+    #[test]
+    fn controller_state_with_pose_without_pose() {
+        use fakexr::UserPath::LeftHand;
+
+        let xr = Arc::new(OpenXrData::new(&Injector::default()).unwrap());
+        let input = Arc::new(Input::new(xr.clone()));
+        xr.input.set(Arc::downgrade(&input));
+        let system = System::new(xr.clone(), &Injector::default());
+        system.input.set(Arc::downgrade(&input));
+
+        let profile = xr
+            .instance
+            .string_to_path("/interaction_profiles/valve/index_controller")
+            .unwrap();
+        fakexr::set_interaction_profile(xr.session_data.get().session.as_raw(), LeftHand, profile);
+        input.setup_legacy_actions();
+        xr.poll_events();
+
+        let get = |pose: *mut vr::TrackedDevicePose_t| {
+            let mut state = vr::VRControllerState_t::default();
+            system.GetControllerStateWithPose(
+                vr::ETrackingUniverseOrigin::Seated,
+                1,
+                &mut state,
+                std::mem::size_of_val(&state) as u32,
+                pose,
+            )
+        };
+        let mut pose = vr::TrackedDevicePose_t::default();
+        assert!(get(&mut pose));
+        // The pose is optional.
+        assert!(get(std::ptr::null_mut()));
     }
 
     #[test]

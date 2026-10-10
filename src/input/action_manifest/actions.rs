@@ -207,11 +207,41 @@ pub fn load_actions(
         let paths = &[left_hand, right_hand];
         macro_rules! create_action {
             ($ty:ty, $data:expr) => {
-                create_action::<$ty>(instance, &$data, sets, english, paths, &mut long_name_idx)
-                    .unwrap()
+                match create_action::<$ty>(
+                    instance,
+                    &$data,
+                    sets,
+                    english,
+                    paths,
+                    &mut long_name_idx,
+                ) {
+                    Ok(action) => action,
+                    Err(e) => {
+                        error!("Failed to create action {}: {e}", $data.name.path);
+                        continue;
+                    }
+                }
             };
         }
         use crate::input::ActionData::*;
+
+        let (ActionType::Boolean(ActionDataCommon { name })
+        | ActionType::Vector1(ActionDataCommon { name })
+        | ActionType::Vector2(ActionDataCommon { name })
+        | ActionType::Vector3(ActionDataCommon { name })
+        | ActionType::Vibration(ActionDataCommon { name })
+        | ActionType::Pose(ActionDataCommon { name })
+        | ActionType::Skeleton(SkeletonData {
+            data: ActionDataCommon { name },
+            ..
+        })) = &action;
+        if !name.is_well_formed() {
+            warn!(
+                "Skipping action {}: not a /actions/<set>/<in|out>/<name> path",
+                name.path
+            );
+            continue;
+        }
         let (path, action) = match &action {
             ActionType::Boolean(data) => (&data.name, Bool(create_action!(bool, data))),
             ActionType::Vector1(data) => (

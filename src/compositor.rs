@@ -931,24 +931,31 @@ impl vr::IVRCompositor029_Interface for Compositor {
         game_pose_count: u32,
     ) -> vr::EVRCompositorError {
         tracy_span!("GetLastPoses impl");
-        if render_pose_count == 0 {
+        if render_pose_count == 0 && game_pose_count == 0 {
             return vr::EVRCompositorError::None;
         }
-        let render_poses = unsafe {
-            std::slice::from_raw_parts_mut(render_pose_array, render_pose_count as usize)
-        };
-        self.input
-            .force(|_| Input::new(self.openxr.clone()))
-            .get_poses(render_poses, None);
+        if (render_pose_count > 0 && render_pose_array.is_null())
+            || (game_pose_count > 0 && game_pose_array.is_null())
+        {
+            return vr::EVRCompositorError::RequestFailed;
+        }
+        let input = self.input.force(|_| Input::new(self.openxr.clone()));
+
+        if render_pose_count > 0 {
+            let render_poses = unsafe {
+                std::slice::from_raw_parts_mut(render_pose_array, render_pose_count as usize)
+            };
+            input.get_poses(render_poses, None);
+        }
 
         // Not entirely sure how the game poses are supposed to differ from the render poses,
         // but a lot of games use the game pose array for controller positions.
+        // The arrays can have different sizes, and the poses are cached, so locate them again.
         if game_pose_count > 0 {
             let game_poses = unsafe {
                 std::slice::from_raw_parts_mut(game_pose_array, game_pose_count as usize)
             };
-            assert!(game_poses.len() <= render_poses.len());
-            game_poses.copy_from_slice(&render_poses[0..game_poses.len()]);
+            input.get_poses(game_poses, None);
         }
 
         vr::EVRCompositorError::None
@@ -1346,10 +1353,12 @@ impl<G: GraphicsBackend> FrameController<G> {
 
             is_valid_swapchain_info(&new_info)
                 .then(|| -> Result<SubmittedEye, vr::EVRCompositorError> {
-                    assert!(
-                        !self.submitting_null,
-                        "App submitted a null texture and a normal texture in the same frame"
-                    );
+                    if self.submitting_null {
+                        crate::warn_once!(
+                            "App submitted a null texture and a normal texture in the same frame"
+                        );
+                        return Err(vr::EVRCompositorError::InvalidTexture);
+                    }
 
                     if !self.swapchain_data.as_ref().is_some_and(|data| {
                         is_usable_swapchain(&data.info, data.initial_format, &new_info)
@@ -2659,6 +2668,120 @@ mod tests {
             vr::IVRCompositor029_Interface::GetPosesForFrame(&*f.comp, 0, std::ptr::null_mut(), 1),
             RequestFailed
         );
+    }
+
+    #[test]
+    fn get_last_poses_null_arrays() {
+        let f = Fixture::new();
+        let mut poses = [vr::TrackedDevicePose_t::default(); 2];
+        let get = |render: *mut vr::TrackedDevicePose_t, game: *mut vr::TrackedDevicePose_t| {
+            vr::IVRCompositor029_Interface::GetLastPoses(&*f.comp, render, 2, game, 2)
+        };
+
+        assert_eq!(get(std::ptr::null_mut(), poses.as_mut_ptr()), RequestFailed);
+        assert_eq!(get(poses.as_mut_ptr(), std::ptr::null_mut()), RequestFailed);
+        // nothing to fill in is not an error, whatever the pointers are
+        assert_eq!(
+            vr::IVRCompositor029_Interface::GetLastPoses(
+                &*f.comp,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0
+            ),
+            None
+        );
+        assert_eq!(f.wait_get_poses(), None);
+    }
+
+    #[test]
+    fn get_last_poses_array_sizes() {
+        let f = Fixture::new();
+        // fakexr can only locate devices relative to the local space
+        vr::IVRCompositor029_Interface::SetTrackingSpace(
+            &*f.comp,
+            vr::ETrackingUniverseOrigin::Seated,
+        );
+        let get = |render: &mut [vr::TrackedDevicePose_t], game: &mut [vr::TrackedDevicePose_t]| {
+            let (render_count, game_count) = (render.len() as u32, game.len() as u32);
+            let (render, game) = (render.as_mut_ptr(), game.as_mut_ptr());
+            vr::IVRCompositor029_Interface::GetLastPoses(
+                &*f.comp,
+                render,
+                render_count,
+                game,
+                game_count,
+            )
+        };
+        let same = |a: &vr::TrackedDevicePose_t, b: &vr::TrackedDevicePose_t| {
+            a.bPoseIsValid == b.bPoseIsValid
+                && a.bDeviceIsConnected == b.bDeviceIsConnected
+                && a.eTrackingResult == b.eTrackingResult
+                && a.mDeviceToAbsoluteTracking.m == b.mDeviceToAbsoluteTracking.m
+        };
+
+        let mut expected = [vr::TrackedDevicePose_t::default(); 1];
+        assert_eq!(get(&mut expected, &mut []), None);
+        assert!(expected[0].bDeviceIsConnected);
+
+        // More game poses than render poses.
+        let mut render = [vr::TrackedDevicePose_t::default(); 1];
+        let mut game = [vr::TrackedDevicePose_t::default(); 3];
+        assert_eq!(get(&mut render, &mut game), None);
+        assert!(same(&render[0], &expected[0]));
+        assert!(same(&game[0], &expected[0]));
+
+        // Only game poses, as in WaitGetPoses(NULL, 0, game, n).
+        let mut game = [vr::TrackedDevicePose_t::default(); 2];
+        assert_eq!(get(&mut [], &mut game), None);
+        assert!(same(&game[0], &expected[0]));
+    }
+
+    #[test]
+    fn submit_null_and_normal_texture_in_one_frame() {
+        let f = Fixture::new();
+        f.ensure_real_session(false);
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_eq!(f.submit(vr::EVREye::Right), None);
+        assert_eq!(f.wait_get_poses(), None);
+
+        // A texture without any pixels in one eye, a normal one in the other.
+        SWAPCHAIN_WIDTH.set(0);
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        SWAPCHAIN_WIDTH.set(10);
+        assert_eq!(f.submit(vr::EVREye::Right), InvalidTexture);
+
+        // The next frame is fine again.
+        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_eq!(f.submit(vr::EVREye::Right), None);
+        assert_eq!(f.wait_get_poses(), None);
+    }
+
+    #[test]
+    fn submit_unsupported_texture() {
+        let f = Fixture::new();
+        assert_eq!(f.wait_get_poses(), None);
+
+        let mut texture = vr::Texture_t {
+            handle: std::ptr::dangling_mut(),
+            eType: vr::ETextureType::DirectX,
+            eColorSpace: vr::EColorSpace::Auto,
+        };
+        let submit = |texture: &vr::Texture_t| {
+            f.comp.Submit(
+                vr::EVREye::Left,
+                texture,
+                std::ptr::null(),
+                vr::EVRSubmitFlags::Default,
+            )
+        };
+        assert_eq!(submit(&texture), InvalidTexture);
+
+        // A Vulkan texture without the Vulkan data.
+        texture.eType = vr::ETextureType::Vulkan;
+        texture.handle = std::ptr::null_mut();
+        assert_eq!(submit(&texture), InvalidTexture);
     }
 
     #[test]

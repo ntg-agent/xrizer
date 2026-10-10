@@ -57,18 +57,19 @@ impl OverlayMan {
             return Err(vr::EVROverlayError::InvalidTexture);
         }
 
-        if !self.openxr.session_data.get().is_real_session()
-            && self
-                .compositor
-                .get()
-                .expect("Need to restart session, but compositor hasn't been set up...")
-                .initialize_real_session(texture, bounds)
-                .is_err()
-        {
-            Err(vr::EVROverlayError::InvalidTexture)
-        } else {
-            Ok(RealSessionData(self.openxr.session_data.get()))
+        if !self.openxr.session_data.get().is_real_session() {
+            let Some(compositor) = self.compositor.get() else {
+                // The app hasn't asked for the compositor yet, which does the session restart.
+                crate::warn_once!(
+                    "Can't set an overlay texture before the application has requested IVRCompositor"
+                );
+                return Err(vr::EVROverlayError::RequestFailed);
+            };
+            if compositor.initialize_real_session(texture, bounds).is_err() {
+                return Err(vr::EVROverlayError::InvalidTexture);
+            }
         }
+        Ok(RealSessionData(self.openxr.session_data.get()))
     }
 
     pub fn set_skybox(&self, textures: &[vr::Texture_t]) -> Result<(), vr::EVRCompositorError> {
@@ -1904,6 +1905,31 @@ mod tests {
         assert!(!o.IsActiveDashboardOverlay(h));
         check_getter(h, 7u32, 0, |h, p| o.GetDashboardOverlaySceneProcess(h, p));
         assert_eq!(o.SetDashboardOverlaySceneProcess(h, 42), E::None);
+    }
+
+    #[test]
+    fn set_texture_before_the_compositor_exists() {
+        // The session only gets its real graphics API from the first texture, which takes the
+        // compositor. An app can set an overlay texture before it ever asked for the compositor.
+        let o = overlay_man();
+        let h = create(&o, c"key");
+        let texture = vr::Texture_t {
+            handle: std::ptr::dangling_mut(),
+            eType: vr::ETextureType::Reserved,
+            eColorSpace: vr::EColorSpace::Auto,
+        };
+        assert_eq!(o.SetOverlayTexture(h, &texture), E::RequestFailed);
+
+        // It doesn't get in the way of the other errors.
+        let unsupported = vr::Texture_t {
+            eType: vr::ETextureType::DirectX,
+            ..texture
+        };
+        assert_eq!(o.SetOverlayTexture(h, &unsupported), E::InvalidTexture);
+        assert_eq!(
+            o.SetOverlayTexture(h, std::ptr::null()),
+            E::InvalidParameter
+        );
     }
 
     #[test]
