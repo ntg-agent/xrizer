@@ -210,6 +210,7 @@ pub enum Call {
     PathToString,
     ApplyHapticFeedback,
     LocateSpace,
+    CreateReferenceSpace,
     CreateActionSpace,
     WaitSwapchainImage,
     ReleaseSwapchainImage,
@@ -1327,6 +1328,7 @@ extern "system" fn create_reference_space(
     create_info: *const xr::ReferenceSpaceCreateInfo,
     space: *mut xr::Space,
 ) -> xr::Result {
+    fail_if_requested!(CreateReferenceSpace);
     let info = unsafe { create_info.as_ref().unwrap() };
     assert_eq!(info.pose_in_reference_space, xr::Posef::IDENTITY);
     let session = get_handle!(session);
