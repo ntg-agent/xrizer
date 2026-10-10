@@ -99,6 +99,12 @@ macro_rules! atomic_float {
 atomic_float!(AtomicF32, f32, AtomicU32);
 atomic_float!(AtomicF64, f64, AtomicU64);
 
+/// Whether a panic was caused by the OpenXR runtime going away (e.g. the runtime was stopped or
+/// crashed). That is usually not xrizer's fault, so there's no point in showing the error dialog.
+fn is_runtime_lost(panic_message: &str) -> bool {
+    panic_message.contains("ERROR_INSTANCE_LOST")
+}
+
 fn init_logging() {
     static ONCE: std::sync::Once = std::sync::Once::new();
 
@@ -156,7 +162,12 @@ fn init_logging() {
                 log::error!("{info}");
                 let backtrace = std::backtrace::Backtrace::force_capture();
                 log::error!("Backtrace: \n{backtrace}");
-                error_dialog::dialog(format!("{info}"), backtrace);
+                let message = format!("{info}");
+                if is_runtime_lost(&message) {
+                    log::error!("The OpenXR runtime went away, not showing the error dialog");
+                } else {
+                    error_dialog::dialog(message, backtrace);
+                }
                 std::process::abort();
             }));
         }
@@ -243,4 +254,21 @@ pub extern "C" fn HmdSystemFactory(
     _return_code: *mut i32,
 ) -> *mut c_void {
     unimplemented!()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_runtime_lost;
+
+    #[test]
+    fn is_runtime_lost_matches_instance_lost() {
+        assert!(is_runtime_lost(
+            "panicked at src/compositor.rs:1377:18:\n\
+             called `Result::unwrap()` on an `Err` value: ERROR_INSTANCE_LOST"
+        ));
+        assert!(!is_runtime_lost(
+            "panicked at src/compositor.rs:1073:17:\n\
+             Failed to create swapchain: the runtime failed to handle the function"
+        ));
+    }
 }
