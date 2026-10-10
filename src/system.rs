@@ -484,8 +484,15 @@ impl vr::IVRSystem026_Interface for System {
             }
         }
     }
-    fn GetTimeSinceLastVsync(&self, _: *mut f32, _: *mut u64) -> bool {
+    fn GetTimeSinceLastVsync(&self, seconds: *mut f32, frame_counter: *mut u64) -> bool {
         crate::warn_unimplemented!("GetTimeSinceLastVsync");
+        // No vsync times are available: report zero for both, as the header documents.
+        if let Some(seconds) = unsafe { seconds.as_mut() } {
+            *seconds = 0.0;
+        }
+        if let Some(frame_counter) = unsafe { frame_counter.as_mut() } {
+            *frame_counter = 0;
+        }
         false
     }
     fn GetRuntimeVersion(&self) -> *const std::os::raw::c_char {
@@ -1603,5 +1610,25 @@ mod tests {
                 .iter()
                 .all(|(ty, _)| *ty != vr::EVREventType::TrackedDeviceUserInteractionEnded as u32)
         );
+    }
+
+    #[test]
+    fn time_since_last_vsync_reports_zero() {
+        let system = System::new(
+            Arc::new(OpenXrData::new(&Injector::default()).unwrap()),
+            &Injector::default(),
+        );
+        let (mut seconds, mut frame_counter) = (1.5f32, 7u64);
+        assert!(!vr::IVRSystem026_Interface::GetTimeSinceLastVsync(
+            &system,
+            &mut seconds,
+            &mut frame_counter
+        ));
+        assert_eq!((seconds, frame_counter), (0.0, 0));
+        assert!(!vr::IVRSystem026_Interface::GetTimeSinceLastVsync(
+            &system,
+            std::ptr::null_mut(),
+            std::ptr::null_mut()
+        ));
     }
 }
