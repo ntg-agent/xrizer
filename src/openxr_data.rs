@@ -10,7 +10,7 @@ use openxr as xr;
 use std::mem::ManuallyDrop;
 use std::sync::{
     RwLock,
-    atomic::{AtomicI64, Ordering},
+    atomic::{AtomicBool, AtomicI64, Ordering},
 };
 use std::time::Duration;
 
@@ -43,6 +43,12 @@ pub struct OpenXrData<C: Compositor> {
     pub display_time: AtomicXrTime,
     pub display_period_nanos: AtomicI64,
     pub enabled_extensions: xr::ExtensionSet,
+    /// Whether the runtime can tell us if the user is wearing the HMD (XR_EXT_user_presence).
+    user_presence_supported: bool,
+    /// The last user presence reported by the runtime. Per XR_EXT_user_presence, the runtime
+    /// reports changes - and the initial state, which is queued after the session begins - as
+    /// events, so we assume the user is present until we get told otherwise.
+    user_present: AtomicBool,
 
     /// should only be externally accessed for testing
     pub(crate) input: Injected<crate::input::Input<C>>,
@@ -99,6 +105,23 @@ fn get_app_name() -> Option<String> {
     Some(basename.to_string_lossy().into_owned())
 }
 
+/// openxr doesn't expose the system properties added by XR_EXT_user_presence.
+fn supports_user_presence(instance: &xr::Instance, system_id: xr::SystemId) -> xr::Result<bool> {
+    let mut presence = xr::sys::SystemUserPresencePropertiesEXT::out(std::ptr::null_mut());
+    let mut properties = xr::sys::SystemProperties::out(presence.as_mut_ptr().cast());
+    unsafe {
+        let result = (instance.fp().get_system_properties)(
+            instance.as_raw(),
+            system_id,
+            properties.as_mut_ptr(),
+        );
+        if result.into_raw() < 0 {
+            return Err(result);
+        }
+        Ok(presence.assume_init().supports_user_presence.into())
+    }
+}
+
 fn make_version() -> u32 {
     env!("CARGO_PKG_VERSION_MAJOR").parse::<u32>().unwrap_or(0) * 1000000
         + env!("CARGO_PKG_VERSION_MINOR").parse::<u32>().unwrap_or(0) * 1000
@@ -139,6 +162,7 @@ impl<C: Compositor> OpenXrData<C> {
             supported_exts.htc_vive_focus3_controller_interaction;
         exts.meta_touch_controller_plus = supported_exts.meta_touch_controller_plus;
         exts.fb_display_refresh_rate = supported_exts.fb_display_refresh_rate;
+        exts.ext_user_presence = supported_exts.ext_user_presence;
 
         // Extension that enables simple full body tracking support via generic tracked devices.
         // Available only in the Monado OpenXR runtime.
@@ -170,6 +194,12 @@ impl<C: Compositor> OpenXrData<C> {
             .system(xr::FormFactor::HEAD_MOUNTED_DISPLAY)
             .map_err(InitError::SystemCreationFailed)?;
 
+        let user_presence_supported = exts.ext_user_presence
+            && supports_user_presence(&instance, system_id).unwrap_or_else(|e| {
+                warn!("Couldn't check for user presence support: {e}");
+                false
+            });
+
         let session_data = SessionReadGuard(RwLock::new(ManuallyDrop::new(
             SessionData::new(
                 &instance,
@@ -194,6 +224,8 @@ impl<C: Compositor> OpenXrData<C> {
             display_time: AtomicXrTime(display_time.into()), // This will get replaced on the first WaitGetPoses
             display_period_nanos: 11111111.into(), // This will get replaced on the first WaitGetPoses
             enabled_extensions: exts,
+            user_presence_supported,
+            user_present: true.into(),
             input: injector.inject(),
             compositor: injector.inject(),
         })
@@ -205,6 +237,12 @@ impl<C: Compositor> OpenXrData<C> {
             drop(data);
             self.session_data.0.write().unwrap().state = state;
         }
+    }
+
+    /// Whether the user is wearing the HMD, or None if the runtime can't tell.
+    pub fn user_presence(&self) -> Option<bool> {
+        self.user_presence_supported
+            .then(|| self.user_present.load(Ordering::Relaxed))
     }
 
     fn poll_events_impl(&self, session_data: &SessionData) -> Option<xr::SessionState> {
@@ -219,6 +257,18 @@ impl<C: Compositor> OpenXrData<C> {
                 xr::Event::InteractionProfileChanged(_) => {
                     if let Some(input) = self.input.get() {
                         input.interaction_profile_changed(session_data);
+                    }
+                }
+                xr::Event::UserPresenceChangedEXT(event) => {
+                    // User presence belongs to the system rather than to a particular session, and
+                    // we replace our session at least once, so don't check which session it's for.
+                    let present = event.is_user_present();
+                    info!("OpenXR user presence changed: {present}");
+                    if self.user_presence_supported
+                        && self.user_present.swap(present, Ordering::Relaxed) != present
+                        && let Some(input) = self.input.get()
+                    {
+                        input.user_presence_changed(present);
                     }
                 }
                 _ => {
@@ -840,6 +890,33 @@ mod tests {
                 data.restart_session();
             });
         });
+
+        drop(data); // Session must be dropped before Vulkan data.
+        drop(comp);
+    }
+
+    #[test]
+    fn user_presence_survives_session_restart() {
+        crate::init_logging();
+        let data = Arc::new(OpenXrData::<FakeCompositor>::new(&Injector::default()).unwrap());
+        let comp = Arc::new(FakeCompositor::new(&data));
+        data.compositor.set(Arc::downgrade(&comp));
+        let raw_session = || data.session_data.get().session.as_raw();
+
+        assert_eq!(data.user_presence(), Some(true));
+        fakexr::set_user_presence(raw_session(), false);
+        data.poll_events();
+        assert_eq!(data.user_presence(), Some(false));
+
+        // We replace the session once the application gives us real graphics information, and
+        // the user shouldn't be considered present again just because of that.
+        data.restart_session();
+        assert_eq!(data.user_presence(), Some(false));
+
+        // A change that the runtime reports while we're restarting must not get lost.
+        fakexr::set_user_presence(raw_session(), true);
+        data.restart_session();
+        assert_eq!(data.user_presence(), Some(true));
 
         drop(data); // Session must be dropped before Vulkan data.
         drop(comp);

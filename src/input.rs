@@ -53,6 +53,7 @@ pub struct Input<C: openxr_data::Compositor> {
     input_source_map: RwLock<SlotMap<InputSourceKey, CString>>,
     left_hand_key: InputSourceKey,
     right_hand_key: InputSourceKey,
+    head_key: InputSourceKey,
     action_map: RwLock<SlotMap<ActionKey, Action>>,
     set_map: RwLock<SlotMap<ActionSetKey, String>>,
     loaded_actions_path: OnceLock<PathBuf>,
@@ -62,6 +63,10 @@ pub struct Input<C: openxr_data::Compositor> {
     subaction_paths: SubactionPaths,
     events: Mutex<VecDeque<InputEvent>>,
     loading_actions: AtomicBool,
+    /// Whether the user was wearing the HMD as of the last UpdateActionState, and whether that
+    /// differed from the UpdateActionState before it. See `Input::head_proximity_state`.
+    synced_user_present: AtomicBool,
+    synced_user_present_changed: AtomicBool,
 }
 
 struct InputEvent {
@@ -103,6 +108,7 @@ impl<C: openxr_data::Compositor> Input<C> {
         let mut map = SlotMap::with_key();
         let left_hand_key = map.insert(c"/user/hand/left".into());
         let right_hand_key = map.insert(c"/user/hand/right".into());
+        let head_key = map.insert(c"/user/head".into());
         let subaction_paths = SubactionPaths::new(&openxr.instance);
         let pose_data = PoseData::new(
             &openxr.instance,
@@ -126,6 +132,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             loaded_actions_path: OnceLock::new(),
             left_hand_key,
             right_hand_key,
+            head_key,
             legacy_state: Default::default(),
             skeletal_tracking_level: RwLock::new(vr::EVRSkeletalTrackingLevel::Estimated),
             estimated_finger_state: [
@@ -135,6 +142,8 @@ impl<C: openxr_data::Compositor> Input<C> {
             subaction_paths,
             events: Mutex::default(),
             loading_actions: false.into(),
+            synced_user_present: true.into(),
+            synced_user_present_changed: false.into(),
         }
     }
 
@@ -288,6 +297,9 @@ struct ExtraActionData {
     double_action: Option<xr::Action<bool>>,
     vector2_action: Option<xr::Action<xr::Vector2f>>,
     grab_actions: Option<GrabActions<custom_bindings::Actions>>,
+    /// The action is bound to /user/head/proximity. There's no OpenXR input path for that, so it's
+    /// backed by the user presence state instead.
+    head_proximity: bool,
 }
 
 #[derive(Debug, Default)]
@@ -438,6 +450,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         let index = match key {
             x if x == self.left_hand_key => Hand::Left as u32,
             x if x == self.right_hand_key => Hand::Right as u32,
+            x if x == self.head_key => vr::k_unTrackedDeviceIndex_Hmd,
             _ => {
                 unsafe {
                     info.write(Default::default());
@@ -1013,7 +1026,32 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
 
         let mut out = WriteOnDrop::new(action_data);
 
-        get_action_from_handle!(self, handle, session_data, action);
+        get_action_from_handle!(self, handle, session_data, action, loaded);
+
+        let digital_data = |state: xr::ActionState<bool>, origin| vr::InputDigitalActionData_t {
+            bActive: state.is_active,
+            bState: state.current_state,
+            activeOrigin: origin,
+            bChanged: state.changed_since_last_sync,
+            fUpdateTime: 0.0, // TODO
+        };
+
+        let head = self.head_key.data().as_ffi();
+        let proximity = if restrict_to_device == vr::k_ulInvalidInputValueHandle
+            || restrict_to_device == head
+        {
+            self.head_proximity_state(loaded, handle)
+        } else {
+            None
+        };
+        if restrict_to_device == head {
+            // The head has nothing but proximity actions.
+            if let Some(state) = proximity {
+                *out.value = digital_data(state, head);
+            }
+            return vr::EVRInputError::None;
+        }
+
         let subaction_path = get_subaction_path!(self, restrict_to_device, action_data);
         let ActionData::Bool(action) = &action else {
             return vr::EVRInputError::WrongType;
@@ -1031,13 +1069,14 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             active_hand = binding_source;
         }
 
-        *out.value = vr::InputDigitalActionData_t {
-            bActive: state.is_active,
-            bState: state.current_state,
-            activeOrigin: active_hand,
-            bChanged: state.changed_since_last_sync,
-            fUpdateTime: 0.0, // TODO
-        };
+        if let Some(proximity) = proximity
+            && (!state.is_active || proximity.current_state && !state.current_state)
+        {
+            state = proximity;
+            active_hand = head;
+        }
+
+        *out.value = digital_data(state, active_hand);
 
         vr::EVRInputError::None
     }
@@ -1121,6 +1160,12 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         {
             tracy_span!("xrSyncActions");
             data.session.sync_actions(&sync_sets).unwrap();
+        }
+
+        if let Some(present) = self.openxr.user_presence() {
+            let was_present = self.synced_user_present.swap(present, Ordering::Relaxed);
+            self.synced_user_present_changed
+                .store(was_present != present, Ordering::Relaxed);
         }
 
         let devices = data.input_data.devices.read().unwrap();
@@ -1606,6 +1651,43 @@ impl<C: openxr_data::Compositor> Input<C> {
         if let Some(path) = self.loaded_actions_path.get() {
             let _ = self.load_action_manifest(data, path);
         }
+    }
+
+    /// Called when the runtime tells us that the user put on or took off the HMD.
+    pub fn user_presence_changed(&self, present: bool) {
+        self.events.lock().unwrap().push_back(InputEvent {
+            ty: if present {
+                vr::EVREventType::TrackedDeviceUserInteractionStarted
+            } else {
+                vr::EVREventType::TrackedDeviceUserInteractionEnded
+            },
+            index: vr::k_unTrackedDeviceIndex_Hmd,
+            data: Default::default(),
+        });
+    }
+
+    /// The state of an action bound to /user/head/proximity, if it is one, and the runtime can
+    /// tell us if the user is wearing the HMD.
+    /// Like any other action, this only changes when the application calls UpdateActionState.
+    fn head_proximity_state(
+        &self,
+        actions: &ManifestLoadedActions,
+        action: vr::VRActionHandle_t,
+    ) -> Option<xr::ActionState<bool>> {
+        if !actions
+            .try_get_extra(action)
+            .is_ok_and(|extra| extra.head_proximity)
+        {
+            return None;
+        }
+        self.openxr.user_presence()?;
+
+        Some(xr::ActionState {
+            current_state: self.synced_user_present.load(Ordering::Relaxed),
+            last_change_time: xr::Time::from_nanos(0), // TODO
+            changed_since_last_sync: self.synced_user_present_changed.load(Ordering::Relaxed),
+            is_active: true,
+        })
     }
 
     pub fn get_next_event(&self, size: u32, out: *mut vr::VREvent_t) -> bool {

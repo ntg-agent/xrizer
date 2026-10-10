@@ -59,6 +59,8 @@ impl ControllerType {
             }
             Self::Knuckles => runner.run::<Knuckles>(),
             Self::ViveFocus3 => runner.run::<ViveFocus3>(),
+            // Not an OpenXR interaction profile - see `bindings::handle_head_bindings`.
+            Self::GenericHmd => {}
             Self::Unknown(_) => {}
         }
     }

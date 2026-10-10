@@ -1,0 +1,17 @@
+{
+	"bindings": {
+		"/actions/set1": {
+			"sources": [
+				{
+					"mode": "button",
+					"path": "/user/head/proximity",
+					"inputs": {
+						"click": {
+							"output": "/actions/set1/in/headworn"
+						}
+					}
+				}
+			]
+		}
+	}
+}
