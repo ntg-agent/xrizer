@@ -1,9 +1,8 @@
 use super::super::{
-    InteractionProfile, MainAxisType, PathTranslation, ProfileProperties, Property,
-    SkeletalInputBindings, StringToPath,
+    DynInputPath, InputToXrPath, InteractionProfile, MainAxisType, ProfileProperties, Property,
+    SkeletalInputBindings, legal_paths, paths::*,
 };
-use crate::input::legacy;
-use crate::input::legacy::LegacyBindings;
+use crate::input::legacy::{self, LegacyBindings};
 use crate::input::profiles::wmr;
 use crate::openxr_data::Hand;
 use glam::Mat4;
@@ -12,7 +11,20 @@ use glam::Vec3;
 pub struct HolographicController;
 
 impl InteractionProfile for HolographicController {
-    fn properties(&self) -> &'static ProfileProperties {
+    type LegalPaths = legal_paths![
+        Both::<
+            (Menu, Click),
+            (Squeeze, Click),
+            (Trigger, Value),
+            (Thumbstick, ()),
+            (Thumbstick, Click),
+            (Trackpad, ()),
+            (Trackpad, Click),
+            (Trackpad, Touch),
+        >
+    ];
+
+    fn properties() -> &'static ProfileProperties {
         static DEVICE_PROPERTIES: ProfileProperties = ProfileProperties {
             model: Property::PerHand {
                 left:c"WindowsMR: 0x045E/0x065B/0/1",
@@ -36,127 +48,95 @@ impl InteractionProfile for HolographicController {
         };
         &DEVICE_PROPERTIES
     }
-    fn profile_path(&self) -> &'static str {
+    fn profile_path() -> &'static str {
         "/interaction_profiles/microsoft/motion_controller"
     }
-    fn translate_map(&self) -> &'static [PathTranslation] {
-        &[
-            PathTranslation {
-                from: "pull",
-                to: "value",
-                stop: false,
-            },
-            PathTranslation {
-                from: "input/grip",
-                to: "input/squeeze",
-                stop: false,
-            },
-            PathTranslation {
-                from: "squeeze/value",
-                to: "squeeze/click",
-                stop: true,
-            },
-            PathTranslation {
-                from: "application_menu",
-                to: "menu",
-                stop: false,
-            },
-            PathTranslation {
-                from: "trigger/click",
-                to: "trigger/value",
-                stop: true,
-            },
-            PathTranslation {
-                from: "joystick",
-                to: "thumbstick",
-                stop: false,
-            },
-        ]
+    fn has_required_extensions(_: &openxr::ExtensionSet) -> bool {
+        true
+    }
+    fn translate_path(path: DynInputPath) -> Option<DynInputPath> {
+        match path {
+            path @ DynInputPath {
+                subpath: DynSubpath::Trigger,
+                component: Some(DynComponent::Click),
+                ..
+            } => Some(path.with_component(DynComponent::Value)),
+            path @ DynInputPath {
+                subpath: DynSubpath::Squeeze,
+                component: Some(DynComponent::Value),
+                ..
+            } => Some(path.with_component(DynComponent::Click)),
+            _ => None,
+        }
     }
 
-    fn legacy_bindings(&self, stp: &dyn StringToPath) -> LegacyBindings {
+    fn legacy_bindings(c: &InputToXrPath<Self>) -> LegacyBindings {
         // Bindings mostly from OpenComposite
         // Games that use legacy bindings will typically just not use the thumbstick,
         // but most users would probably prefer to use it, so let's use it.
         // And also, games that use the face button can instead use the trackpad as one big button
         LegacyBindings {
             extra: legacy::Bindings {
-                grip_pose: stp.leftright("input/grip/pose"),
+                grip_pose: c.pose(),
             },
-            trigger: stp.leftright("input/trigger/value"),
-            trigger_click: stp.leftright("input/trigger/value"),
-            app_menu: stp.leftright("input/menu/click"),
-            a: stp.leftright("input/trackpad/click"),
-            squeeze: stp.leftright("input/squeeze/click"),
-            squeeze_click: stp.leftright("input/squeeze/click"),
-            main_xy: stp.leftright("input/thumbstick"),
-            main_xy_click: stp.leftright("input/thumbstick/click"),
+            trigger: c.leftright::<Trigger, Value, _, _>(),
+            trigger_click: c.leftright::<Trigger, Value, _, _>(),
+            app_menu: c.leftright::<Menu, Click, _, _>(),
+            a: c.leftright::<Trackpad, Click, _, _>(),
+            squeeze: c.leftright::<Squeeze, Click, _, _>(),
+            squeeze_click: c.leftright::<Squeeze, Click, _, _>(),
+            main_xy: c.leftright::<Thumbstick, (), _, _>(),
+            main_xy_click: c.leftright::<Thumbstick, Click, _, _>(),
             main_xy_touch: vec![],
-            haptic: stp.leftright("output/haptic"),
+            haptic: c.haptics(),
         }
     }
 
-    fn skeletal_input_bindings(&self, stp: &dyn StringToPath) -> SkeletalInputBindings {
+    fn skeletal_input_bindings(c: &InputToXrPath<Self>) -> SkeletalInputBindings {
         SkeletalInputBindings {
-            thumb_touch: stp.leftright("input/trackpad/touch"),
-            index_touch: stp.leftright("input/trigger/value"),
-            index_curl: stp.leftright("input/trigger/value"),
-            rest_curl: stp.leftright("input/squeeze/click"),
+            thumb_touch: c.leftright::<Trackpad, Touch, _, _>(),
+            index_touch: c.leftright::<Trigger, Value, _, _>(),
+            index_curl: c.leftright::<Trigger, Value, _, _>(),
+            rest_curl: c.leftright::<Squeeze, Click, _, _>(),
         }
     }
 
-    fn legal_paths(&self) -> Box<[String]> {
-        [
-            "input/menu/click",
-            "input/squeeze/click",
-            "input/trigger/value",
-            "input/thumbstick/x",
-            "input/thumbstick/y",
-            "input/thumbstick/click",
-            "input/thumbstick",
-            "input/trackpad/x",
-            "input/trackpad/y",
-            "input/trackpad/click",
-            "input/trackpad/touch",
-            "input/trackpad",
-            "input/grip/pose",
-            "input/aim/pose",
-            "output/haptic",
-        ]
-        .iter()
-        .flat_map(|s| {
-            [
-                format!("/user/hand/left/{s}"),
-                format!("/user/hand/right/{s}"),
-            ]
-        })
-        .collect()
-    }
-
-    fn offset_grip_pose(&self, _hand: Hand) -> Mat4 {
+    fn offset_grip_pose(_hand: Hand) -> Mat4 {
         Mat4::from_translation(Vec3::new(
             // From the models found here https://www.microsoft.com/en-us/download/details.aspx?id=56414
             0.0, 0.026310, -0.078693,
         ))
-    }
-
-    fn has_required_extensions(&self, _: &openxr::ExtensionSet) -> bool {
-        true
     }
 }
 
 #[cfg(test)]
 pub(super) mod tests {
     use super::{HolographicController, InteractionProfile};
+    use crate::input::profiles::wmr::tests::verify_left_controller_properties;
     use crate::input::tests::Fixture;
     use openxr as xr;
 
     #[test]
     fn verify_bindings() {
-        base_verify_bindings(HolographicController.profile_path());
+        base_verify_bindings(HolographicController::profile_path());
     }
 
-    // Separate so the the tests can be reused for the Samsung Odyssey controllers
+    #[test]
+    fn controller_properties() {
+        verify_left_controller_properties::<HolographicController>(
+            c"holographic_controller",
+            c"WindowsMR: 0x045E/0x065B/0/1",
+        );
+    }
+
+    #[test]
+    fn needs_no_extension() {
+        assert!(HolographicController::has_required_extensions(
+            &openxr::ExtensionSet::default()
+        ));
+    }
+
+    // Separate so the tests can be reused for the Samsung Odyssey controllers
     pub(crate) fn base_verify_bindings(path: &'static str) {
         let f = Fixture::new();
         f.load_actions(c"actions.json");

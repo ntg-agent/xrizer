@@ -6,6 +6,7 @@ pub mod vive_controller;
 pub mod vive_focus3;
 #[cfg(feature = "monado")]
 pub mod vive_tracker;
+pub mod wmr;
 use super::{
     action_manifest::ControllerType, legacy::LegacyBindings, skeletal::SkeletalInputBindings,
 };
@@ -21,6 +22,10 @@ use std::ffi::CStr;
 use std::marker::PhantomData;
 use vive_controller::ViveWands;
 use vive_focus3::ViveFocus3;
+use wmr::{
+    hp_motion_controller::ReverbG2Controller, ms_motion_controller::HolographicController,
+    samsung_odyssey_controller::SamsungOdysseyController,
+};
 
 #[allow(private_interfaces)]
 pub trait InteractionProfile: SupportedProfile + Sized + 'static {
@@ -61,6 +66,11 @@ impl ControllerType {
             Self::ViveFocus3 => runner.run::<ViveFocus3>(),
             // Not an OpenXR interaction profile - see `bindings::handle_head_bindings`.
             Self::GenericHmd => {}
+            Self::HolographicController => {
+                runner.run::<HolographicController>();
+                runner.run::<SamsungOdysseyController>();
+            }
+            Self::HPMotionController => runner.run::<ReverbG2Controller>(),
             Self::Unknown(_) => {}
         }
     }
@@ -97,6 +107,9 @@ pub fn run_for_all_profiles(runner: &mut impl RunWithProfile) {
     profile!(MetaTouchPlus);
     profile!(OculusTouch);
     profile!(ViveFocus3);
+    profile!(HolographicController);
+    profile!(SamsungOdysseyController);
+    profile!(ReverbG2Controller);
     profile!(SimpleController);
 }
 

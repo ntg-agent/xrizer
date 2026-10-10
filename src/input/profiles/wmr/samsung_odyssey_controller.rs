@@ -1,5 +1,5 @@
 use super::super::{
-    InteractionProfile, PathTranslation, ProfileProperties, SkeletalInputBindings, StringToPath,
+    DynInputPath, InputToXrPath, InteractionProfile, ProfileProperties, SkeletalInputBindings,
 };
 use super::ms_motion_controller::HolographicController;
 use crate::input::legacy::LegacyBindings;
@@ -11,7 +11,10 @@ use glam::Vec3;
 pub struct SamsungOdysseyController;
 
 impl InteractionProfile for SamsungOdysseyController {
-    fn properties(&self) -> &'static ProfileProperties {
+    // Identical inputs to the original Windows Mixed Reality controllers.
+    type LegalPaths = <HolographicController as InteractionProfile>::LegalPaths;
+
+    fn properties() -> &'static ProfileProperties {
         static DEVICE_PROPERTIES: ProfileProperties = ProfileProperties {
             model: Property::PerHand {
                 left:c"WindowsMR: 0x04E8/0x065D/0/1",
@@ -35,44 +38,58 @@ impl InteractionProfile for SamsungOdysseyController {
         };
         &DEVICE_PROPERTIES
     }
-    fn profile_path(&self) -> &'static str {
+    fn profile_path() -> &'static str {
         "/interaction_profiles/samsung/odyssey_controller"
     }
-    fn translate_map(&self) -> &'static [PathTranslation] {
-        HolographicController.translate_map()
+    fn has_required_extensions(enabled_extensions: &openxr::ExtensionSet) -> bool {
+        enabled_extensions.ext_samsung_odyssey_controller
+    }
+    fn translate_path(path: DynInputPath) -> Option<DynInputPath> {
+        HolographicController::translate_path(path)
     }
 
-    fn legacy_bindings(&self, stp: &dyn StringToPath) -> LegacyBindings {
-        HolographicController.legacy_bindings(stp)
+    fn legacy_bindings(c: &InputToXrPath<Self>) -> LegacyBindings {
+        HolographicController::legacy_bindings(&InputToXrPath::new(c.instance))
     }
 
-    fn skeletal_input_bindings(&self, stp: &dyn StringToPath) -> SkeletalInputBindings {
-        HolographicController.skeletal_input_bindings(stp)
+    fn skeletal_input_bindings(c: &InputToXrPath<Self>) -> SkeletalInputBindings {
+        HolographicController::skeletal_input_bindings(&InputToXrPath::new(c.instance))
     }
 
-    fn legal_paths(&self) -> Box<[String]> {
-        HolographicController.legal_paths()
-    }
-
-    fn offset_grip_pose(&self, _hand: Hand) -> Mat4 {
+    fn offset_grip_pose(_hand: Hand) -> Mat4 {
         Mat4::from_translation(Vec3::new(
             // From the models found here https://www.microsoft.com/en-us/download/details.aspx?id=56414
             0.0, 0.079738, -0.035449,
         ))
-    }
-
-    fn has_required_extensions(&self, enabled_extensions: &openxr::ExtensionSet) -> bool {
-        enabled_extensions.ext_samsung_odyssey_controller
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{InteractionProfile, SamsungOdysseyController};
-    use crate::input::profiles::wmr::ms_motion_controller;
+    use crate::input::profiles::wmr::{
+        ms_motion_controller, tests::verify_left_controller_properties,
+    };
 
     #[test]
     fn verify_bindings() {
-        ms_motion_controller::tests::base_verify_bindings(SamsungOdysseyController.profile_path());
+        ms_motion_controller::tests::base_verify_bindings(SamsungOdysseyController::profile_path());
+    }
+
+    #[test]
+    fn controller_properties() {
+        // Games only know the Odyssey controllers as holographic controllers
+        verify_left_controller_properties::<SamsungOdysseyController>(
+            c"holographic_controller",
+            c"WindowsMR: 0x04E8/0x065D/0/1",
+        );
+    }
+
+    #[test]
+    fn requires_extension() {
+        let mut exts = openxr::ExtensionSet::default();
+        assert!(!SamsungOdysseyController::has_required_extensions(&exts));
+        exts.ext_samsung_odyssey_controller = true;
+        assert!(SamsungOdysseyController::has_required_extensions(&exts));
     }
 }
