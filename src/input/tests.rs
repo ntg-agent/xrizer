@@ -2115,3 +2115,213 @@ fn skeletal_null_out_pointers() {
     );
     assert_eq!(level, vr::EVRSkeletalTrackingLevel::Partial);
 }
+
+const SESSION_LOST: xr::sys::Result = xr::sys::Result::ERROR_SESSION_LOST;
+
+fn fail_call(call: fakexr::Call, err: xr::sys::Result) {
+    fakexr::set_call_failure(call, Some(err));
+}
+
+fn restore_call(call: fakexr::Call) {
+    fakexr::set_call_failure(call, None);
+}
+
+#[test]
+fn update_action_state_runtime_failure() {
+    let mut f = Fixture::new();
+    let set1 = f.get_action_set_handle(c"/actions/set1");
+    f.load_actions(c"actions.json");
+
+    // The runtime failing xrSyncActions must not abort the game (#425).
+    fail_call(fakexr::Call::SyncActions, SESSION_LOST);
+    let mut active = vr::VRActiveActionSet_t {
+        ulActionSet: set1,
+        ..Default::default()
+    };
+    assert_eq!(
+        f.input.UpdateActionState(
+            &mut active,
+            std::mem::size_of::<vr::VRActiveActionSet_t>() as u32,
+            1
+        ),
+        vr::EVRInputError::IPCError
+    );
+    // The frame start syncs the actions if no controllers are connected.
+    f.input.frame_start_update();
+
+    restore_call(fakexr::Call::SyncActions);
+    f.sync(vr::VRActiveActionSet_t {
+        ulActionSet: set1,
+        ..Default::default()
+    });
+}
+
+#[test]
+fn action_data_runtime_failure() {
+    let mut f = Fixture::new();
+    let set1 = f.get_action_set_handle(c"/actions/set1");
+    let boolact = f.get_action_handle(c"/actions/set1/in/boolact");
+    let vec1act = f.get_action_handle(c"/actions/set1/in/vec1act");
+    let vec2act = f.get_action_handle(c"/actions/set1/in/vec2act");
+    let skeleton = f.get_action_handle(c"/actions/set1/in/skellyl");
+    f.load_actions(c"actions.json");
+
+    fakexr::set_action_state(
+        f.get_action::<bool>(boolact),
+        fakexr::ActionState::Bool(true),
+        LeftHand,
+    );
+    fakexr::set_action_state(
+        f.get_action::<f32>(vec1act),
+        fakexr::ActionState::Float(0.5),
+        LeftHand,
+    );
+    fakexr::set_action_state(
+        f.get_action::<xr::Vector2f>(vec2act),
+        fakexr::ActionState::Vector2(0.25, 0.75),
+        LeftHand,
+    );
+    f.sync(vr::VRActiveActionSet_t {
+        ulActionSet: set1,
+        ..Default::default()
+    });
+
+    let analog = |action| {
+        let mut state = vr::InputAnalogActionData_t::default();
+        let err = f.input.GetAnalogActionData(
+            action,
+            &mut state,
+            std::mem::size_of_val(&state) as u32,
+            0,
+        );
+        assert_eq!(err, vr::EVRInputError::None);
+        state
+    };
+    let skeletal_active = || {
+        let mut state = vr::InputSkeletalActionData_t::default();
+        let err = vr::IVRInput010_Interface::GetSkeletalActionData(
+            &*f.input,
+            skeleton,
+            &mut state,
+            std::mem::size_of_val(&state) as u32,
+        );
+        assert_eq!(err, vr::EVRInputError::None);
+        state.bActive
+    };
+    let state = f.get_bool_state(boolact).unwrap();
+    assert!(state.bActive && state.bState);
+    let state = analog(vec1act);
+    assert!(state.bActive && state.x == 0.5);
+    let state = analog(vec2act);
+    assert!(state.bActive && state.x == 0.25 && state.y == 0.75);
+    assert!(skeletal_active());
+
+    // The runtime failing to get an action state must not abort the game. The actions are
+    // inactive then.
+    fail_call(fakexr::Call::GetActionState, SESSION_LOST);
+    let state = f.get_bool_state(boolact).unwrap();
+    assert!(!state.bActive && !state.bState);
+    for action in [vec1act, vec2act] {
+        let state = analog(action);
+        assert!(!state.bActive);
+        assert_eq!((state.x, state.y), (0.0, 0.0));
+    }
+    assert!(!skeletal_active());
+
+    // The skeleton is estimated from the actions if there are no controllers.
+    let mut bones = [vr::VRBoneTransform_t::default(); 31];
+    assert_eq!(
+        vr::IVRInput011_Interface::GetSkeletalBoneData(
+            &*f.input,
+            skeleton,
+            vr::EVRSkeletalTransformSpace::Parent,
+            vr::EVRSkeletalMotionRange::WithController,
+            bones.as_mut_ptr(),
+            bones.len() as u32,
+        ),
+        vr::EVRInputError::None
+    );
+    let mut summary = vr::VRSkeletalSummaryData_t::default();
+    assert_eq!(
+        vr::IVRInput010_Interface::GetSkeletalSummaryData(
+            &*f.input,
+            skeleton,
+            vr::EVRSummaryType::FromAnimation,
+            &mut summary
+        ),
+        vr::EVRInputError::None
+    );
+
+    restore_call(fakexr::Call::GetActionState);
+    let state = f.get_bool_state(boolact).unwrap();
+    assert!(state.bActive && state.bState);
+    assert_eq!(analog(vec1act).x, 0.5);
+    assert!(skeletal_active());
+}
+
+#[test]
+fn haptic_runtime_failure() {
+    let f = Fixture::new();
+    f.load_actions(c"actions.json");
+    let vibration = f.get_action_handle(c"/actions/set1/in/vib");
+    let haptic = f.get_action::<xr::Haptic>(vibration);
+    let left = f.get_input_source_handle(c"/user/hand/left");
+    let trigger = || {
+        f.input
+            .TriggerHapticVibrationAction(vibration, 0.0, 0.1, 100.0, 1.0, left)
+    };
+
+    // The runtime failing xrApplyHapticFeedback must not abort the game.
+    fail_call(fakexr::Call::ApplyHapticFeedback, SESSION_LOST);
+    assert_eq!(trigger(), vr::EVRInputError::IPCError);
+    assert!(!fakexr::is_haptic_activated(haptic, LeftHand));
+
+    restore_call(fakexr::Call::ApplyHapticFeedback);
+    assert_eq!(trigger(), vr::EVRInputError::None);
+    assert!(fakexr::is_haptic_activated(haptic, LeftHand));
+}
+
+// miri doesn't let fakexr read the vibration
+#[test]
+#[cfg_attr(miri, ignore)]
+fn haptic_parameters_are_clamped() {
+    let f = Fixture::new();
+    f.load_actions(c"actions.json");
+    let vibration = f.get_action_handle(c"/actions/set1/in/vib");
+    let haptic = f.get_action::<xr::Haptic>(vibration);
+    let left = f.get_input_source_handle(c"/user/hand/left");
+    let trigger = |duration, frequency, amplitude| {
+        assert_eq!(
+            f.input
+                .TriggerHapticVibrationAction(vibration, 0.0, duration, frequency, amplitude, left),
+            vr::EVRInputError::None
+        );
+        fakexr::last_haptic_vibration(haptic, LeftHand).expect("no vibration was applied")
+    };
+    let vibration = |amplitude, frequency, duration_secs: i64| fakexr::Vibration {
+        amplitude,
+        frequency,
+        duration_nanos: duration_secs * 1_000_000_000,
+    };
+
+    // values in range are passed on
+    assert_eq!(
+        trigger(0.5, 100.0, 0.5),
+        fakexr::Vibration {
+            amplitude: 0.5,
+            frequency: 100.0,
+            duration_nanos: 500_000_000
+        }
+    );
+    // The runtime is allowed to reject anything else. Zero is "unspecified" for the frequency.
+    assert_eq!(trigger(-1.0, -5.0, 2.0), vibration(1.0, 0.0, 0));
+    assert_eq!(trigger(1e9, 1e9, -1.0), vibration(0.0, 10_000.0, 10));
+    assert_eq!(
+        trigger(f32::INFINITY, f32::INFINITY, f32::INFINITY),
+        vibration(1.0, 10_000.0, 10)
+    );
+    assert_eq!(
+        trigger(f32::NAN, f32::NAN, f32::NAN),
+        vibration(0.0, 0.0, 0)
+    );
+}

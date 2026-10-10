@@ -1,4 +1,4 @@
-use super::{Input, PoseData, WriteOnDrop};
+use super::{Input, PoseData, WriteOnDrop, state_or_inactive};
 use crate::{
     input::{
         LoadedActions, ManifestLoadedActions,
@@ -93,12 +93,13 @@ impl<C: openxr_data::Compositor> Input<C> {
         session
             .attach_action_sets(&[&legacy.set, pose_set])
             .unwrap();
-        session
-            .sync_actions(&[
-                xr::ActiveActionSet::new(&legacy.set),
-                xr::ActiveActionSet::new(pose_set),
-            ])
-            .unwrap();
+        // The actions are attached, so if this fails they are just synced with the next frame.
+        if let Err(err) = session.sync_actions(&[
+            xr::ActiveActionSet::new(&legacy.set),
+            xr::ActiveActionSet::new(pose_set),
+        ]) {
+            crate::warn_once!("Failed to sync the legacy actions: {}", err);
+        }
 
         input_data
             .actions
@@ -162,17 +163,16 @@ impl<C: openxr_data::Compositor> Input<C> {
         duration_us: ::std::ffi::c_ushort,
     ) {
         trace!("triggered legacy haptic while using action manifest");
-        manifest_actions
-            .haptic_action
-            .apply_feedback(
-                &self.openxr.session_data.get().session,
-                hand_path,
-                &xr::HapticVibration::new()
-                    .amplitude(1.0)
-                    .frequency(xr::FREQUENCY_UNSPECIFIED)
-                    .duration(xr::Duration::from_nanos(i64::from(duration_us) * 1000)),
-            )
-            .unwrap();
+        if let Err(err) = manifest_actions.haptic_action.apply_feedback(
+            &self.openxr.session_data.get().session,
+            hand_path,
+            &xr::HapticVibration::new()
+                .amplitude(1.0)
+                .frequency(xr::FREQUENCY_UNSPECIFIED)
+                .duration(xr::Duration::from_nanos(i64::from(duration_us) * 1000)),
+        ) {
+            crate::warn_once!("Failed to trigger haptic: {}", err);
+        }
     }
 
     pub fn get_legacy_controller_state(
@@ -229,11 +229,12 @@ impl<C: openxr_data::Compositor> Input<C> {
 
         let mut read_button =
             |id, click_action: &xr::Action<bool>, touch_action: Option<&xr::Action<bool>>| {
-                let touch_state = touch_action.map(|a| a.state(&data.session, hand_path).unwrap());
+                let touch_state =
+                    touch_action.map(|a| state_or_inactive(a, &data.session, hand_path));
                 let touched = touch_state.is_some_and(|s| s.current_state);
                 state.ulButtonTouched |= button_mask_from_id(id) & (touched as u64 * u64::MAX);
 
-                let click_state = click_action.state(&data.session, hand_path).unwrap();
+                let click_state = state_or_inactive(click_action, &data.session, hand_path);
                 let pressed = click_state.current_state;
                 state.ulButtonPressed |= button_mask_from_id(id) & (pressed as u64 * u64::MAX);
 
@@ -278,19 +279,19 @@ impl<C: openxr_data::Compositor> Input<C> {
         read_button(vr::EVRButtonId::Grip, &actions.squeeze_click, None);
         read_button(vr::EVRButtonId::Axis2, &actions.squeeze_click, None);
 
-        let j = actions.main_xy.state(&data.session, hand_path).unwrap();
+        let j = state_or_inactive(&actions.main_xy, &data.session, hand_path);
         state.rAxis[0] = vr::VRControllerAxis_t {
             x: j.current_state.x,
             y: j.current_state.y,
         };
 
-        let t = actions.trigger.state(&data.session, hand_path).unwrap();
+        let t = state_or_inactive(&actions.trigger, &data.session, hand_path);
         state.rAxis[1] = vr::VRControllerAxis_t {
             x: t.current_state,
             y: 0.0,
         };
 
-        let s = actions.squeeze.state(&data.session, hand_path).unwrap();
+        let s = state_or_inactive(&actions.squeeze, &data.session, hand_path);
         state.rAxis[2] = vr::VRControllerAxis_t {
             x: s.current_state,
             y: 0.0,
@@ -433,6 +434,7 @@ mod tests {
     use crate::openxr_data::Hand;
     use openvr as vr;
     use openxr as xr;
+    use std::sync::atomic::Ordering;
 
     #[repr(C)]
     #[derive(Default)]
@@ -816,6 +818,92 @@ mod tests {
     }
 
     #[test]
+    fn sync_actions_runtime_failure() {
+        let mut f = Fixture::new();
+        f.input.openxr.restart_session();
+        f.set_interaction_profile::<SimpleController>(fakexr::UserPath::LeftHand);
+        f.set_interaction_profile::<SimpleController>(fakexr::UserPath::RightHand);
+        f.input.openxr.poll_events();
+
+        // The runtime failing xrSyncActions must not abort the game (#425). That includes the first
+        // sync, when the legacy actions are set up.
+        let packet_num = || f.input.legacy_state.packet_num.load(Ordering::Relaxed);
+        fakexr::set_call_failure(
+            fakexr::Call::SyncActions,
+            Some(xr::sys::Result::ERROR_SESSION_LOST),
+        );
+        f.input.frame_start_update();
+        assert!(
+            f.input
+                .openxr
+                .session_data
+                .get()
+                .input_data
+                .get_legacy_actions()
+                .is_some()
+        );
+
+        // The failed syncs don't count as new states of the controllers.
+        let packet = packet_num();
+        f.input.frame_start_update();
+        f.input.frame_start_update();
+        assert_eq!(packet_num(), packet);
+
+        fakexr::set_call_failure(fakexr::Call::SyncActions, None);
+        f.input.frame_start_update();
+        assert_eq!(packet_num(), packet + 1);
+    }
+
+    #[test]
+    fn controller_state_runtime_failure() {
+        use fakexr::UserPath::*;
+        let mut f = Fixture::new();
+        f.input.openxr.restart_session();
+        f.set_interaction_profile::<Knuckles>(LeftHand);
+        f.set_interaction_profile::<Knuckles>(RightHand);
+        f.input.frame_start_update();
+        f.input.openxr.poll_events();
+        let click = f
+            .input
+            .openxr
+            .session_data
+            .get()
+            .input_data
+            .get_legacy_actions()
+            .unwrap()
+            .actions
+            .trigger_click
+            .as_raw();
+
+        let pressed_and_trigger = || {
+            let mut state = vr::VRControllerState_t::default();
+            assert!(f.input.get_legacy_controller_state(
+                1,
+                &mut state,
+                std::mem::size_of_val(&state) as u32
+            ));
+            // The braces copy the fields, which are unaligned.
+            ({ state.ulButtonPressed } != 0, { state.rAxis }[1].x)
+        };
+        fakexr::set_action_state(click, fakexr::ActionState::Bool(true), LeftHand);
+        f.input.frame_start_update();
+        assert!(pressed_and_trigger().0);
+
+        // The runtime failing to get the states must not abort the game (#425). Nothing is
+        // pressed then.
+        fakexr::set_call_failure(
+            fakexr::Call::GetActionState,
+            Some(xr::sys::Result::ERROR_SESSION_LOST),
+        );
+        f.input.frame_start_update();
+        assert_eq!(pressed_and_trigger(), (false, 0.0));
+
+        fakexr::set_call_failure(fakexr::Call::GetActionState, None);
+        f.input.frame_start_update();
+        assert!(pressed_and_trigger().0);
+    }
+
+    #[test]
     fn legacy_haptic() {
         let mut f = Fixture::new();
         f.input.openxr.restart_session();
@@ -857,6 +945,46 @@ mod tests {
         assert!(fakexr::is_haptic_activated(
             haptic,
             fakexr::UserPath::RightHand
+        ));
+    }
+
+    #[test]
+    fn legacy_haptic_with_action_manifest_runtime_failure() {
+        let mut f = Fixture::new();
+        f.load_actions(c"actions.json");
+        f.input.openxr.restart_session();
+        f.set_interaction_profile::<SimpleController>(fakexr::UserPath::LeftHand);
+        f.input.openxr.poll_events();
+        f.input.frame_start_update();
+        f.input.openxr.poll_events();
+        f.input.frame_start_update();
+        let haptic = f
+            .input
+            .openxr
+            .session_data
+            .get()
+            .input_data
+            .get_loaded_actions()
+            .unwrap()
+            .haptic_action
+            .as_raw();
+
+        // The runtime failing xrApplyHapticFeedback must not abort the game.
+        fakexr::set_call_failure(
+            fakexr::Call::ApplyHapticFeedback,
+            Some(xr::sys::Result::ERROR_SESSION_LOST),
+        );
+        f.input.legacy_haptic(1, 0, 3000);
+        assert!(!fakexr::is_haptic_activated(
+            haptic,
+            fakexr::UserPath::LeftHand
+        ));
+
+        fakexr::set_call_failure(fakexr::Call::ApplyHapticFeedback, None);
+        f.input.legacy_haptic(1, 0, 3000);
+        assert!(fakexr::is_haptic_activated(
+            haptic,
+            fakexr::UserPath::LeftHand
         ));
     }
 

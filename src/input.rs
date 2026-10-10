@@ -69,6 +69,11 @@ pub struct Input<C: openxr_data::Compositor> {
     synced_user_present_changed: AtomicBool,
 }
 
+/// The longest haptic pulse we ask the runtime for, in seconds.
+const MAX_HAPTIC_DURATION_SECONDS: f32 = 10.0;
+/// The highest haptic frequency we ask the runtime for, in hertz.
+const MAX_HAPTIC_FREQUENCY: f32 = 10_000.0;
+
 struct InputEvent {
     ty: vr::EVREventType,
     index: vr::TrackedDeviceIndex_t,
@@ -101,6 +106,24 @@ impl<T> Drop for WriteOnDrop<T> {
             self.ptr.write(val);
         }
     }
+}
+
+/// Gets the state of an action. If the runtime fails to (the session is lost, for example), the
+/// failure is logged once and the action is reported as inactive.
+fn state_or_inactive<T: xr::ActionInput + Default, G>(
+    action: &xr::Action<T>,
+    session: &xr::Session<G>,
+    subaction_path: xr::Path,
+) -> xr::ActionState<T> {
+    action.state(session, subaction_path).unwrap_or_else(|err| {
+        crate::warn_once!("Failed to get action state: {}", err);
+        xr::ActionState {
+            current_state: T::default(),
+            changed_since_last_sync: false,
+            last_change_time: xr::Time::from_nanos(0),
+            is_active: false,
+        }
+    })
 }
 
 impl<C: openxr_data::Compositor> Input<C> {
@@ -525,16 +548,26 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             warn!("start_seconds_from_now: {start_seconds_from_now}")
         }
 
-        action
-            .apply_feedback(
-                &session_data.session,
-                subaction_path,
-                &xr::HapticVibration::new()
-                    .amplitude(amplitude.clamp(0.0, 1.0))
-                    .frequency(frequency)
-                    .duration(xr::Duration::from_nanos((duration_seconds * 1e9) as _)),
-            )
-            .unwrap();
+        // The runtime is allowed to reject values out of range, so don't pass those on.
+        let clamp = |value: f32, max| {
+            if value.is_nan() {
+                0.0
+            } else {
+                value.clamp(0.0, max)
+            }
+        };
+        let duration_seconds = clamp(duration_seconds, MAX_HAPTIC_DURATION_SECONDS);
+        if let Err(err) = action.apply_feedback(
+            &session_data.session,
+            subaction_path,
+            &xr::HapticVibration::new()
+                .amplitude(clamp(amplitude, 1.0))
+                .frequency(clamp(frequency, MAX_HAPTIC_FREQUENCY))
+                .duration(xr::Duration::from_nanos((duration_seconds * 1e9) as _)),
+        ) {
+            crate::warn_once!("Failed to trigger haptic: {}", err);
+            return vr::EVRInputError::IPCError;
+        }
 
         vr::EVRInputError::None
     }
@@ -790,13 +823,15 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             Err(e) => return e,
         };
         let pose_data = data.input_data.pose_data.get().unwrap();
+        let active = pose_data
+            .grip
+            .is_active(&data.session, xr::Path::NULL)
+            .unwrap_or_else(|err| {
+                crate::warn_once!("Failed to get pose action state: {}", err);
+                false
+            });
         unsafe {
-            std::ptr::addr_of_mut!((*action_data).bActive).write(
-                pose_data
-                    .grip
-                    .is_active(&data.session, xr::Path::NULL)
-                    .unwrap(),
-            );
+            std::ptr::addr_of_mut!((*action_data).bActive).write(active);
             std::ptr::addr_of_mut!((*action_data).activeOrigin).write(origin);
         }
         vr::EVRInputError::None
@@ -983,7 +1018,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         let mut active_hand = restrict_to_device;
         let (state, delta) = match action {
             ActionData::Vector1 { action, last_value } => {
-                let mut state = action.state(&session_data.session, subaction_path).unwrap();
+                let mut state = state_or_inactive(action, &session_data.session, subaction_path);
 
                 // It's generally not clear how SteamVR handles float actions with multiple bindings;
                 //   so emulate OpenXR, which takes maximum among active actions
@@ -1024,7 +1059,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
                 )
             }
             ActionData::Vector2 { action, last_value } => {
-                let state = action.state(&session_data.session, subaction_path).unwrap();
+                let state = state_or_inactive(action, &session_data.session, subaction_path);
                 let delta = xr::Vector2f {
                     x: state.current_state.x - last_value.0.swap(state.current_state.x),
                     y: state.current_state.y - last_value.1.swap(state.current_state.y),
@@ -1093,7 +1128,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             return vr::EVRInputError::WrongType;
         };
 
-        let mut state = action.state(&session_data.session, subaction_path).unwrap();
+        let mut state = state_or_inactive(action, &session_data.session, subaction_path);
 
         let mut active_hand = restrict_to_device;
         if let Some((binding_state, binding_source)) =
@@ -1197,7 +1232,10 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
 
         {
             tracy_span!("xrSyncActions");
-            data.session.sync_actions(&sync_sets).unwrap();
+            if let Err(err) = data.session.sync_actions(&sync_sets) {
+                crate::warn_once!("Failed to sync actions: {}", err);
+                return vr::EVRInputError::IPCError;
+            }
         }
 
         if let Some(present) = self.openxr.user_presence() {
@@ -1495,14 +1533,16 @@ impl<C: openxr_data::Compositor> Input<C> {
             let mut controller = devices.get_controller_mut(hand);
             let subaction_path = self.get_subaction_path(hand);
 
-            let profile_path = session_data
+            let profile_path = match session_data
                 .session
                 .current_interaction_profile(subaction_path)
-                .unwrap();
-
-            if let Some(controller) = controller.as_mut() {
-                controller.profile_path = profile_path;
-            }
+            {
+                Ok(path) => path,
+                Err(err) => {
+                    crate::warn_once!("Failed to get the interaction profile: {}", err);
+                    continue;
+                }
+            };
 
             let profile_name = match profile_path {
                 xr::Path::NULL => {
@@ -1512,12 +1552,26 @@ impl<C: openxr_data::Compositor> Input<C> {
                     "<null>".to_owned()
                 }
                 path => {
+                    let name = match self.openxr.instance.path_to_string(path) {
+                        Ok(name) => name,
+                        Err(err) => {
+                            crate::warn_once!(
+                                "Failed to get the interaction profile name: {}",
+                                err
+                            );
+                            continue;
+                        }
+                    };
                     if let Some(controller) = controller.as_mut() {
                         controller.connected = true;
                     }
-                    self.openxr.instance.path_to_string(path).unwrap()
+                    name
                 }
             };
+
+            if let Some(controller) = controller.as_mut() {
+                controller.profile_path = profile_path;
+            }
 
             struct Data<'a> {
                 profile_name: &'a str,
@@ -1578,8 +1632,8 @@ impl<C: openxr_data::Compositor> Input<C> {
                 "{} interaction profile changed: {}",
                 self.openxr
                     .instance
-                    .path_to_string(self.get_subaction_path(hand))
-                    .unwrap(),
+                    .path_to_string(subaction_path)
+                    .unwrap_or_else(|_| format!("{hand:?}")),
                 profile_name
             )
         }
@@ -1594,9 +1648,9 @@ impl<C: openxr_data::Compositor> Input<C> {
         }
 
         #[cfg(feature = "monado")]
-        devices
-            .create_monado_generic_trackers(&self.openxr, session_data)
-            .unwrap();
+        if let Err(err) = devices.create_monado_generic_trackers(&self.openxr, session_data) {
+            crate::warn_once!("Failed to create the generic trackers: {}", err);
+        }
     }
 
     pub fn frame_start_update(&self) {
@@ -1622,21 +1676,25 @@ impl<C: openxr_data::Compositor> Input<C> {
                 && (right_hand.is_none_or(|hand| !hand.connected))
             {
                 debug!("no controllers connected - syncing info set");
-                data.session
+                if let Err(err) = data
+                    .session
                     .sync_actions(&[xr::ActiveActionSet::new(&loaded.info_set)])
-                    .unwrap();
+                {
+                    crate::warn_once!("Failed to sync the info action set: {}", err);
+                }
             }
             return;
         }
 
         match input_data.get_legacy_actions() {
             Some(actions) => {
-                data.session
-                    .sync_actions(&[
-                        xr::ActiveActionSet::new(&actions.set),
-                        xr::ActiveActionSet::new(&input_data.pose_data.get().unwrap().set),
-                    ])
-                    .unwrap();
+                if let Err(err) = data.session.sync_actions(&[
+                    xr::ActiveActionSet::new(&actions.set),
+                    xr::ActiveActionSet::new(&input_data.pose_data.get().unwrap().set),
+                ]) {
+                    crate::warn_once!("Failed to sync the legacy actions: {}", err);
+                    return;
+                }
 
                 self.legacy_state.on_action_sync();
             }
@@ -1935,12 +1993,14 @@ impl HandSpace {
                 },
             };
 
-            *self.raw.write().unwrap() = Some(
-                pose_data
-                    .grip
-                    .create_space(&session_data.session, self.hand_path, offset_pose)
-                    .unwrap(),
-            );
+            let space = pose_data
+                .grip
+                .create_space(&session_data.session, self.hand_path, offset_pose)
+                .inspect_err(|err| {
+                    crate::warn_once!("Failed to create the raw hand space: {}", err)
+                })
+                .ok()?;
+            *self.raw.write().unwrap() = Some(space);
         }
 
         Some(SpaceReadGuard(self.raw.read().unwrap()))

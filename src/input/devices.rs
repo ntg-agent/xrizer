@@ -449,16 +449,21 @@ impl TrackedDeviceList {
             xdevs.len()
         );
 
-        let trackers = xdevs.into_iter().map(|xdev| {
+        let trackers = xdevs.into_iter().filter_map(|xdev| {
             let serial = CString::new(xdev.serial()).unwrap();
-            let space = xdev.create_space(xr::Posef::IDENTITY).unwrap();
+            let space = xdev
+                .create_space(xr::Posef::IDENTITY)
+                .inspect_err(|err| {
+                    crate::warn_once!("Failed to create the space of a generic tracker: {}", err)
+                })
+                .ok()?;
             let mut tracker = TrackedDevice::new(
                 TrackedDeviceType::GenericTracker { serial, space },
                 None,
                 Some(ProfileData::new::<ViveTracker>()),
             );
             tracker.connected = true;
-            tracker
+            Some(tracker)
         });
         self.devices.extend(trackers);
 
@@ -610,7 +615,11 @@ impl<C: openxr_data::Compositor> Input<C> {
 
 #[cfg(test)]
 mod tests {
-    use crate::input::{profiles::knuckles::Knuckles, tests::Fixture};
+    use crate::input::{
+        InteractionProfile,
+        profiles::{knuckles::Knuckles, simple_controller::SimpleController},
+        tests::Fixture,
+    };
     use crate::openxr_data::Hand;
     use openvr as vr;
     use openxr as xr;
@@ -687,6 +696,140 @@ mod tests {
             .unwrap();
         assert!(!pose.bPoseIsValid);
         assert!(!pose.bDeviceIsConnected);
+    }
+
+    #[test]
+    fn interaction_profile_runtime_failure() {
+        let mut f = Fixture::new();
+        f.load_actions(c"actions.json");
+        f.set_interaction_profile::<Knuckles>(fakexr::UserPath::LeftHand);
+
+        // The runtime failing when we look at a new interaction profile must not abort the game
+        // (#425). The controller is not there then.
+        for call in [
+            fakexr::Call::GetCurrentInteractionProfile,
+            fakexr::Call::PathToString,
+        ] {
+            fakexr::set_call_failure(call, Some(xr::sys::Result::ERROR_SESSION_LOST));
+            f.input.frame_start_update();
+            f.input.openxr.poll_events();
+            f.input.frame_start_update();
+            assert!(!f.input.is_device_connected(1));
+            fakexr::set_call_failure(call, None);
+        }
+
+        // It shows up with the next change of the profile.
+        f.input.frame_start_update();
+        f.input.openxr.poll_events();
+        f.input.frame_start_update();
+        assert!(f.input.is_device_connected(1));
+
+        // A controller keeps its profile if the runtime fails to tell the name of the new one.
+        let set1 = f.get_action_set_handle(c"/actions/set1");
+        let profile = |f: &Fixture, ty: &str| {
+            let path = f.input.openxr.instance.string_to_path(ty).unwrap();
+            let session_data = f.input.openxr.session_data.get();
+            let devices = session_data.input_data.devices.read().unwrap();
+            devices.get_controller(Hand::Left).unwrap().profile_path == path
+        };
+        assert!(profile(&f, Knuckles::profile_path()));
+        f.set_interaction_profile::<SimpleController>(fakexr::UserPath::LeftHand);
+        fakexr::set_call_failure(
+            fakexr::Call::PathToString,
+            Some(xr::sys::Result::ERROR_SESSION_LOST),
+        );
+        f.sync(vr::VRActiveActionSet_t {
+            ulActionSet: set1,
+            ..Default::default()
+        });
+        fakexr::set_call_failure(fakexr::Call::PathToString, None);
+        assert!(profile(&f, Knuckles::profile_path()));
+    }
+
+    #[test]
+    fn hand_space_runtime_failure() {
+        let mut f = Fixture::new();
+        f.load_actions(c"actions.json");
+        f.set_interaction_profile::<Knuckles>(fakexr::UserPath::LeftHand);
+        f.input.frame_start_update();
+        f.input.openxr.poll_events();
+        f.input.frame_start_update();
+        assert!(f.input.is_device_connected(1));
+
+        // The pose of the controller needs a space that is created on the first request. The
+        // runtime failing to do that must not abort the game (#425).
+        let get_pose = || {
+            f.input
+                .get_controller_pose(Hand::Left, Some(vr::ETrackingUniverseOrigin::Seated))
+                .unwrap()
+        };
+        fakexr::set_call_failure(
+            fakexr::Call::CreateActionSpace,
+            Some(xr::sys::Result::ERROR_SESSION_LOST),
+        );
+        let pose = get_pose();
+        assert!(!pose.bPoseIsValid);
+        assert!(pose.bDeviceIsConnected);
+
+        // The pose is cached until the next frame.
+        fakexr::set_call_failure(fakexr::Call::CreateActionSpace, None);
+        f.input.frame_start_update();
+        let pose = get_pose();
+        assert!(pose.bDeviceIsConnected);
+        let pose_data = f.input.openxr.session_data.get();
+        assert!(
+            pose_data
+                .input_data
+                .pose_data
+                .get()
+                .unwrap()
+                .left_space
+                .raw
+                .read()
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    #[cfg_attr(not(feature = "monado"), ignore)]
+    fn generic_tracker_runtime_failure() {
+        let mut f = Fixture::new();
+        let set1 = f.get_action_set_handle(c"/actions/set1");
+        f.load_actions(c"actions.json");
+        f.set_interaction_profile::<Knuckles>(fakexr::UserPath::LeftHand);
+        fakexr::add_trackers(f.input.openxr.session_data.get().session.as_raw());
+
+        // Syncing makes the runtime send the interaction profile event, which creates the trackers.
+        let sync = || {
+            let mut active = vr::VRActiveActionSet_t {
+                ulActionSet: set1,
+                ..Default::default()
+            };
+            vr::IVRInput010_Interface::UpdateActionState(
+                &*f.input,
+                &mut active,
+                std::mem::size_of::<vr::VRActiveActionSet_t>() as u32,
+                1,
+            );
+            f.input.openxr.poll_events();
+        };
+
+        // The runtime failing to list or to create a tracker must not abort the game (#425).
+        // The tracker is not there then.
+        for call in [fakexr::Call::CreateXDevList, fakexr::Call::CreateXDevSpace] {
+            fakexr::set_call_failure(call, Some(xr::sys::Result::ERROR_SESSION_LOST));
+            sync();
+            assert!(f.input.is_device_connected(1));
+            assert!(f.input.device_index_to_tracked_device_class(2).is_none());
+            fakexr::set_call_failure(call, None);
+        }
+
+        sync();
+        assert_eq!(
+            f.input.device_index_to_tracked_device_class(2),
+            Some(vr::ETrackedDeviceClass::GenericTracker)
+        );
     }
 
     #[test]

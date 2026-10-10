@@ -174,6 +174,7 @@ pub(crate) mod xr {
         buffer_count_output: *mut u32,
         buffer: *mut c_char,
     ) -> xr::Result {
+        crate::fail_if_requested!(GetVulkanExtensions);
         static EXTS: &CStr = c"VK_foo VK_bar";
         static LEN: usize = EXTS.count_bytes() + 1;
 

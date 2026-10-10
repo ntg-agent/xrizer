@@ -235,9 +235,13 @@ impl<C: Compositor> OpenXrData<C> {
 
     pub fn poll_events(&self) {
         let data = self.session_data.get();
-        if let Some(state) = self.poll_events_impl(&data) {
-            drop(data);
-            self.session_data.0.write().unwrap().state = state;
+        match self.poll_events_impl(&data) {
+            Ok(Some(state)) => {
+                drop(data);
+                self.session_data.0.write().unwrap().state = state;
+            }
+            Ok(None) => {}
+            Err(err) => crate::warn_once!("Failed to poll events: {}", err),
         }
     }
 
@@ -247,10 +251,10 @@ impl<C: Compositor> OpenXrData<C> {
             .then(|| self.user_present.load(Ordering::Relaxed))
     }
 
-    fn poll_events_impl(&self, session_data: &SessionData) -> Option<xr::SessionState> {
+    fn poll_events_impl(&self, session_data: &SessionData) -> xr::Result<Option<xr::SessionState>> {
         let mut buf = xr::EventDataBuffer::new();
         let mut state = None;
-        while let Some(event) = self.instance.poll_event(&mut buf).unwrap() {
+        while let Some(event) = self.instance.poll_event(&mut buf)? {
             match event {
                 xr::Event::SessionStateChanged(event) => {
                     state = Some(event.state());
@@ -279,7 +283,7 @@ impl<C: Compositor> OpenXrData<C> {
             }
         }
 
-        state
+        Ok(state)
     }
 
     pub fn restart_session(&self) {
@@ -334,10 +338,16 @@ impl<C: Compositor> OpenXrData<C> {
             let xr::Posef {
                 position,
                 orientation,
-            } = view_space
-                .locate(ref_space, self.display_time.get())
-                .unwrap()
-                .pose;
+            } = match view_space.locate(ref_space, self.display_time.get()) {
+                Ok(location) => location.pose,
+                Err(err) => {
+                    crate::warn_once!(
+                        "Couldn't locate the view to reset the tracking space: {}",
+                        err
+                    );
+                    return;
+                }
+            };
 
             // Only set the rotation around the y axis
             let (twist, _) = swing_twist_decomposition(
@@ -349,20 +359,22 @@ impl<C: Compositor> OpenXrData<C> {
                 (Quat::IDENTITY, Quat::IDENTITY)
             });
 
-            *adjusted_space = session
-                .create_reference_space(
-                    ty,
-                    xr::Posef {
-                        position,
-                        orientation: xr::Quaternionf {
-                            x: twist.x,
-                            y: twist.y,
-                            z: twist.z,
-                            w: twist.w,
-                        },
+            let space = session.create_reference_space(
+                ty,
+                xr::Posef {
+                    position,
+                    orientation: xr::Quaternionf {
+                        x: twist.x,
+                        y: twist.y,
+                        z: twist.z,
+                        w: twist.w,
                     },
-                )
-                .unwrap();
+                },
+            );
+            match space {
+                Ok(space) => *adjusted_space = space,
+                Err(err) => crate::warn_once!("Couldn't reset the tracking space: {}", err),
+            }
         };
 
         match origin {
@@ -407,7 +419,7 @@ impl<C: Compositor> OpenXrData<C> {
         session_data.session.request_exit().unwrap();
         let mut state = session_data.state;
         while state != xr::SessionState::STOPPING {
-            if let Some(s) = self.poll_events_impl(session_data) {
+            if let Some(s) = self.poll_events_impl(session_data).unwrap() {
                 state = s;
             }
         }
@@ -417,7 +429,7 @@ impl<C: Compositor> OpenXrData<C> {
         }
         session_data.session.end().unwrap();
         while state != xr::SessionState::EXITING {
-            if let Some(s) = self.poll_events_impl(session_data) {
+            if let Some(s) = self.poll_events_impl(session_data).unwrap() {
                 state = s;
             }
         }
@@ -806,6 +818,7 @@ pub use tests::FakeCompositor;
 mod tests {
     use super::{FrameStream, GraphicsBackend, OpenXrData, SessionCreateInfo};
     use crate::clientcore::Injector;
+    use openvr as vr;
     use openxr as xr;
     use std::ffi::CStr;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -895,6 +908,44 @@ mod tests {
 
         drop(data); // Session must be dropped before Vulkan data.
         drop(comp);
+    }
+
+    const SESSION_LOST: xr::sys::Result = xr::sys::Result::ERROR_SESSION_LOST;
+
+    #[test]
+    fn poll_events_runtime_failure() {
+        crate::init_logging();
+        let data = OpenXrData::<FakeCompositor>::new(&Injector::default()).unwrap();
+        let raw_session = || data.session_data.get().session.as_raw();
+
+        // The runtime failing xrPollEvent must not abort the game (#425), and the events are
+        // handled when it works again.
+        fakexr::set_user_presence(raw_session(), false);
+        fakexr::set_call_failure(fakexr::Call::PollEvent, Some(SESSION_LOST));
+        data.poll_events();
+        assert_eq!(data.user_presence(), Some(true));
+
+        fakexr::set_call_failure(fakexr::Call::PollEvent, None);
+        data.poll_events();
+        assert_eq!(data.user_presence(), Some(false));
+    }
+
+    #[test]
+    fn reset_tracking_space_runtime_failure() {
+        crate::init_logging();
+        let data = OpenXrData::<FakeCompositor>::new(&Injector::default()).unwrap();
+
+        // The runtime failing to locate the view or to create the new space must not abort the
+        // game (#425).
+        for call in [
+            fakexr::Call::LocateSpace,
+            fakexr::Call::CreateReferenceSpace,
+        ] {
+            fakexr::set_call_failure(call, Some(SESSION_LOST));
+            data.reset_tracking_space(vr::ETrackingUniverseOrigin::Seated);
+            fakexr::set_call_failure(call, None);
+        }
+        data.reset_tracking_space(vr::ETrackingUniverseOrigin::Seated);
     }
 
     #[test]

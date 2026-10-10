@@ -32,6 +32,7 @@ pub(super) extern "system" fn create_x_dev_list_m_n_d_x(
     _create_info: *const openxr_mndx_xdev_space::bindings::CreateXDevListInfoMNDX,
     xdev_list: *mut openxr_mndx_xdev_space::bindings::XDevListMNDX,
 ) -> xr::Result {
+    crate::fail_if_requested!(CreateXDevList);
     let session = get_handle!(session);
     let xdevs = if session.with_trackers.load(Ordering::Relaxed) {
         vec![XDev {
@@ -151,6 +152,7 @@ pub(super) extern "system" fn create_x_dev_space_m_n_d_x(
     create_info: *const openxr_mndx_xdev_space::bindings::CreateXDevSpaceInfoMNDX,
     space: *mut xr::Space,
 ) -> xr::Result {
+    crate::fail_if_requested!(CreateXDevSpace);
     let s = get_handle!(session);
     unsafe {
         if (*create_info).xdev_id != XDevIdMNDX::from_raw(43u64) {

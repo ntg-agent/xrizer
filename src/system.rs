@@ -748,7 +748,11 @@ impl vr::IVRSystem026_Interface for System {
         if got_event && !pose.is_null() {
             unsafe {
                 let index = (&raw const (*event).trackedDeviceIndex).read();
-                pose.write(input.get_device_pose(index, Some(origin)).unwrap());
+                pose.write(
+                    input
+                        .get_device_pose(index, Some(origin))
+                        .unwrap_or_default(),
+                );
             }
         }
         got_event
@@ -1748,6 +1752,45 @@ mod tests {
         f.set_user_present(false);
         assert!(poll_with_pose(std::ptr::null_mut(), std::ptr::null_mut()));
         assert!(!poll(&mut event));
+    }
+
+    #[test]
+    fn poll_event_with_pose_runtime_failure() {
+        const ENDED: u32 = vr::EVREventType::TrackedDeviceUserInteractionEnded as u32;
+        const STARTED: u32 = vr::EVREventType::TrackedDeviceUserInteractionStarted as u32;
+        let f = PresenceFixture::new();
+        // Returns the type of each event and whether its pose is valid.
+        let poll_all = || {
+            let mut events = Vec::new();
+            loop {
+                let mut event = vr::VREvent_t::default();
+                let mut pose = vr::TrackedDevicePose_t::default();
+                if !f.system.PollNextEventWithPose(
+                    vr::ETrackingUniverseOrigin::Seated,
+                    &mut event,
+                    std::mem::size_of_val(&event) as u32,
+                    &mut pose,
+                ) {
+                    return events;
+                }
+                events.push((event.eventType, pose.bPoseIsValid));
+            }
+        };
+
+        // The runtime failing to locate the HMD must not abort the game (#425). The events come
+        // with a pose that isn't valid.
+        f.set_user_present(false);
+        fakexr::set_call_failure(
+            fakexr::Call::LocateSpace,
+            Some(xr::sys::Result::ERROR_SESSION_LOST),
+        );
+        let events = poll_all();
+        assert!(events.iter().any(|&(ty, _)| ty == ENDED));
+        assert!(events.iter().all(|&(_, valid)| !valid));
+
+        fakexr::set_call_failure(fakexr::Call::LocateSpace, None);
+        f.set_user_present(true);
+        assert_eq!(poll_all(), [(STARTED, true)]);
     }
 
     #[test]

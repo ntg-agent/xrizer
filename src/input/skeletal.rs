@@ -1,7 +1,7 @@
 #[path = "skeletal_generated.rs"]
 mod generated;
 
-use super::Input;
+use super::{Input, state_or_inactive};
 use crate::openxr_data::{self, Hand, SessionData};
 use HandSkeletonBone::*;
 use glam::{Affine3A, Quat, Vec3};
@@ -360,26 +360,14 @@ impl<C: openxr_data::Compositor> Input<C> {
 
         let subaction = self.get_subaction_path(hand);
 
-        let thumb_touch = actions
-            .thumb_touch
-            .state(&session_data.session, subaction)
-            .unwrap()
-            .current_state;
-        let index_touch = actions
-            .index_touch
-            .state(&session_data.session, subaction)
-            .unwrap()
-            .current_state;
-        let index_curl = actions
-            .index_curl
-            .state(&session_data.session, subaction)
-            .unwrap()
-            .current_state;
-        let rest_curl = actions
-            .rest_curl
-            .state(&session_data.session, subaction)
-            .unwrap()
-            .current_state;
+        let thumb_touch =
+            state_or_inactive(&actions.thumb_touch, &session_data.session, subaction).current_state;
+        let index_touch =
+            state_or_inactive(&actions.index_touch, &session_data.session, subaction).current_state;
+        let index_curl =
+            state_or_inactive(&actions.index_curl, &session_data.session, subaction).current_state;
+        let rest_curl =
+            state_or_inactive(&actions.rest_curl, &session_data.session, subaction).current_state;
 
         let index = index_curl.max(
             // Curl the index finger slightly on touch input
