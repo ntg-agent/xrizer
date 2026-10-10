@@ -421,11 +421,19 @@ impl vr::IVRCompositor029_Interface for Compositor {
         buffer: *mut std::ffi::c_char,
         buffer_size: u32,
     ) -> u32 {
-        let exts = self
+        let Ok(exts) = self
             .openxr
             .instance
             .vulkan_legacy_device_extensions(self.openxr.system_id)
-            .unwrap();
+            .inspect_err(|err| {
+                crate::warn_once!(
+                    "Couldn't get the required Vulkan device extensions: {}",
+                    err
+                )
+            })
+        else {
+            return 0;
+        };
         log::debug!("required device extensions: {exts}");
         fill_vk_extensions_buffer(exts, buffer, buffer_size)
     }
@@ -435,11 +443,19 @@ impl vr::IVRCompositor029_Interface for Compositor {
         buffer: *mut std::ffi::c_char,
         buffer_size: u32,
     ) -> u32 {
-        let exts = self
+        let Ok(exts) = self
             .openxr
             .instance
             .vulkan_legacy_instance_extensions(self.openxr.system_id)
-            .unwrap();
+            .inspect_err(|err| {
+                crate::warn_once!(
+                    "Couldn't get the required Vulkan instance extensions: {}",
+                    err
+                )
+            })
+        else {
+            return 0;
+        };
         log::debug!("required instance extensions: {exts}");
         fill_vk_extensions_buffer(exts, buffer, buffer_size)
     }
@@ -2613,6 +2629,35 @@ mod tests {
                     .GetVulkanDeviceExtensionsRequired(std::ptr::null_mut(), buf, size)
             },
             "device exts",
+        );
+    }
+
+    #[test]
+    fn vulkan_extensions_runtime_failure() {
+        let f = Fixture::new();
+
+        // The runtime can't tell what to enable, which is reported as no extensions (0 is the size
+        // of the string, not counting the terminator that there is nothing to put one after).
+        fail_call(fakexr::Call::GetVulkanExtensions, RUNTIME_FAILURE);
+        let mut buf = [1 as c_char; 64];
+        let len = buf.len() as u32;
+        assert_eq!(
+            f.comp
+                .GetVulkanInstanceExtensionsRequired(buf.as_mut_ptr(), len),
+            0
+        );
+        assert_eq!(
+            f.comp
+                .GetVulkanDeviceExtensionsRequired(std::ptr::null_mut(), buf.as_mut_ptr(), len),
+            0
+        );
+        assert_eq!(buf, [1; 64]);
+
+        restore_call(fakexr::Call::GetVulkanExtensions);
+        assert_ne!(
+            f.comp
+                .GetVulkanInstanceExtensionsRequired(std::ptr::null_mut(), 0),
+            0
         );
     }
 
