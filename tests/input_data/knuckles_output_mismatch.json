@@ -1,0 +1,56 @@
+{
+	"bindings": {
+		"/actions/default": {
+			"haptics": [
+				{
+					"output": "/actions/default/in/use",
+					"path": "/user/hand/left/output/haptic"
+				},
+				{
+					"output": "/actions/default/out/buzz",
+					"path": "/user/hand/left/output/haptic"
+				}
+			],
+			"poses": [
+				{
+					"output": "/actions/default/in/use",
+					"path": "/user/hand/left/pose/raw"
+				},
+				{
+					"output": "/actions/default/in/hand",
+					"path": "/user/hand/left/pose/raw"
+				}
+			],
+			"skeleton": [
+				{
+					"output": "/actions/default/in/use",
+					"path": "/user/hand/left/input/skeleton/left"
+				},
+				{
+					"output": "/actions/default/in/skel",
+					"path": "/user/hand/left/input/skeleton/left"
+				}
+			],
+			"sources": [
+				{
+					"inputs": {
+						"touch": {
+							"output": "/actions/default/in/use"
+						}
+					},
+					"mode": "trigger",
+					"path": "/user/hand/left/input/trigger"
+				},
+				{
+					"inputs": {
+						"double": {
+							"output": "not-an-action-path"
+						}
+					},
+					"mode": "button",
+					"path": "/user/hand/left/input/a"
+				}
+			]
+		}
+	}
+}

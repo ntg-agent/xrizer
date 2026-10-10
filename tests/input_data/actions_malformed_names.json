@@ -1,0 +1,27 @@
+{
+	"action_sets": [
+		{
+			"name": "/actions/default",
+			"usage": "leftright"
+		}
+	],
+	"actions": [
+		{
+			"name": "/actions/default/in/use",
+			"type": "boolean"
+		},
+		{
+			"name": "not-a-path",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/default",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/default/in/after",
+			"type": "boolean"
+		}
+	],
+	"default_bindings": []
+}

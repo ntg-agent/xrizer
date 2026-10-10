@@ -1974,3 +1974,67 @@ fn set_action_manifest_path_twice() {
     assert_eq!(set(c"actions.json"), vr::EVRInputError::None);
     f.get_action::<bool>(f.get_action_handle(c"/actions/set1/in/boolact"));
 }
+
+#[test]
+fn malformed_action_names_are_skipped() {
+    let f = Fixture::new();
+    f.load_actions(c"actions_malformed_names.json");
+
+    // The actions around the ones with a name that isn't /actions/<set>/<in|out>/<name> are loaded.
+    for name in [c"/actions/default/in/use", c"/actions/default/in/after"] {
+        f.get_action::<bool>(f.get_action_handle(name));
+    }
+    for name in [c"not-a-path", c"/actions/default"] {
+        assert_eq!(
+            f.get_bool_state(f.get_action_handle(name)).unwrap_err(),
+            vr::EVRInputError::InvalidHandle
+        );
+    }
+}
+
+#[test]
+fn duplicate_action_names_are_skipped() {
+    let f = Fixture::new();
+    f.load_actions(c"actions_duplicate_names.json");
+
+    // OpenXR action names are only the last part of the path, so the second foo can't be created.
+    f.get_action::<bool>(f.get_action_handle(c"/actions/default/in/foo"));
+    f.get_action::<bool>(f.get_action_handle(c"/actions/default/in/after"));
+    let vibration = f.get_action_handle(c"/actions/default/out/foo");
+    assert_eq!(
+        f.input
+            .TriggerHapticVibrationAction(vibration, 0.0, 0.1, 100.0, 1.0, 0),
+        vr::EVRInputError::InvalidHandle
+    );
+}
+
+#[test]
+fn bindings_for_outputs_of_the_wrong_kind_are_skipped() {
+    let f = Fixture::new();
+    // The binding file binds the boolean action "use" as a haptic output, as a pose and as a skeleton,
+    // and a double tap to something that isn't an action path.
+    // Those must be skipped without preventing the valid bindings for the other actions.
+    f.load_actions(c"actions_output_mismatch.json");
+
+    let path = Knuckles::profile_path();
+    f.verify_bindings::<bool>(
+        path,
+        c"/actions/default/in/use",
+        ["/user/hand/left/input/trigger/touch".into()],
+    );
+    f.verify_bindings::<xr::Haptic>(
+        path,
+        c"/actions/default/out/buzz",
+        ["/user/hand/left/output/haptic".into()],
+    );
+    assert!(
+        f.get_pose(f.get_action_handle(c"/actions/default/in/hand"), 0)
+            .is_ok()
+    );
+    let skel = f.get_action_handle(c"/actions/default/in/skel");
+    let mut count = 0;
+    assert_eq!(
+        vr::IVRInput011_Interface::GetBoneCount(&*f.input, skel, &mut count),
+        vr::EVRInputError::None
+    );
+}

@@ -1,0 +1,23 @@
+{
+	"action_sets": [
+		{
+			"name": "/actions/default",
+			"usage": "leftright"
+		}
+	],
+	"actions": [
+		{
+			"name": "/actions/default/in/foo",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/default/out/foo",
+			"type": "vibration"
+		},
+		{
+			"name": "/actions/default/in/after",
+			"type": "boolean"
+		}
+	],
+	"default_bindings": []
+}

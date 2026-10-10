@@ -1,0 +1,33 @@
+{
+	"action_sets": [
+		{
+			"name": "/actions/default",
+			"usage": "leftright"
+		}
+	],
+	"actions": [
+		{
+			"name": "/actions/default/in/use",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/default/in/hand",
+			"type": "pose"
+		},
+		{
+			"name": "/actions/default/in/skel",
+			"type": "skeleton",
+			"skeleton": "/skeleton/hand/left"
+		},
+		{
+			"name": "/actions/default/out/buzz",
+			"type": "vibration"
+		}
+	],
+	"default_bindings": [
+		{
+			"controller_type": "knuckles",
+			"binding_url": "knuckles_output_mismatch.json"
+		}
+	]
+}
