@@ -664,9 +664,15 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         _parent_overlay_handle: vr::VROverlayHandle_t,
         _subview_overlay_key: *const ::std::os::raw::c_char,
         _subview_overlay_name: *const ::std::os::raw::c_char,
-        _subview_overlay_handle: *mut vr::VROverlayHandle_t,
+        subview_overlay_handle: *mut vr::VROverlayHandle_t,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("CreateSubviewOverlay");
+        if !subview_overlay_handle.is_null() {
+            unsafe {
+                subview_overlay_handle.write(vr::k_ulOverlayHandleInvalid);
+            }
+        }
+        vr::EVROverlayError::RequestFailed
     }
 
     fn FindOverlay(
@@ -890,10 +896,19 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         &self,
         _: *const c_char,
         _: *const c_char,
-        _: *mut vr::VROverlayHandle_t,
-        _: *mut vr::VROverlayHandle_t,
+        main_handle: *mut vr::VROverlayHandle_t,
+        thumbnail_handle: *mut vr::VROverlayHandle_t,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("CreateDashboardOverlay");
+        // There is no dashboard to put these overlays in.
+        for handle in [main_handle, thumbnail_handle] {
+            if !handle.is_null() {
+                unsafe {
+                    handle.write(vr::k_ulOverlayHandleInvalid);
+                }
+            }
+        }
+        vr::EVROverlayError::RequestFailed
     }
     fn GetOverlayTextureSize(
         &self,
@@ -953,7 +968,8 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         _: u32,
         _: u32,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("SetOverlayRaw");
+        vr::EVROverlayError::RequestFailed
     }
     fn ClearOverlayTexture(&self, handle: vr::VROverlayHandle_t) -> vr::EVROverlayError {
         get_overlay!(self, handle, mut overlay);
@@ -1055,7 +1071,9 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         false
     }
     fn WaitFrameSync(&self, _: u32) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("WaitFrameSync");
+        // This is only a pacing helper, so returning right away is fine.
+        vr::EVROverlayError::None
     }
     fn GetTransformForOverlayCoordinates(
         &self,
@@ -1250,7 +1268,8 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         todo!()
     }
     fn SetOverlayPreCurvePitch(&self, _: vr::VROverlayHandle_t, _: f32) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("SetOverlayPreCurvePitch");
+        vr::EVROverlayError::None
     }
     fn GetOverlayCurvature(
         &self,
@@ -1420,8 +1439,19 @@ impl vr::IVROverlay028_Interface for OverlayMan {
     ) -> vr::EVROverlayError {
         todo!()
     }
-    fn SetOverlayName(&self, _: vr::VROverlayHandle_t, _: *const c_char) -> vr::EVROverlayError {
-        todo!()
+    fn SetOverlayName(
+        &self,
+        handle: vr::VROverlayHandle_t,
+        name: *const c_char,
+    ) -> vr::EVROverlayError {
+        get_overlay!(self, handle, mut overlay);
+        if name.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
+        let name = unsafe { CStr::from_ptr(name) };
+        debug!("renaming overlay {:?} to {name:?}", overlay.name);
+        overlay.name = name.into();
+        vr::EVROverlayError::None
     }
     fn GetOverlayName(
         &self,
@@ -1763,5 +1793,96 @@ mod tests {
         assert_eq!(o.SetOverlayCursor(h, cursor), E::None);
         assert_eq!(o.TriggerLaserMouseHapticVibration(h, 0., 0., 0.), E::None);
         assert!(!o.IsHoverTargetOverlay(h));
+    }
+
+    #[test]
+    fn subview_and_dashboard_overlays_are_refused() {
+        let o = overlay_man();
+        let parent = create(&o, c"parent");
+        let (key, name) = (c"sub".as_ptr(), c"Sub".as_ptr());
+        let count = || o.overlays.read().unwrap().len();
+        let mut handle = 7;
+        let err = o.CreateSubviewOverlay(parent, key, name, &mut handle);
+        assert_eq!(
+            (err, handle),
+            (E::RequestFailed, vr::k_ulOverlayHandleInvalid)
+        );
+        let err = o.CreateSubviewOverlay(parent, key, name, std::ptr::null_mut());
+        assert_eq!(err, E::RequestFailed);
+
+        let (mut main, mut thumb) = (7, 8);
+        let err = o.CreateDashboardOverlay(key, name, &mut main, &mut thumb);
+        let invalid = vr::k_ulOverlayHandleInvalid;
+        assert_eq!((err, main, thumb), (E::RequestFailed, invalid, invalid));
+        let null = std::ptr::null_mut();
+        assert_eq!(
+            o.CreateDashboardOverlay(key, name, null, null),
+            E::RequestFailed
+        );
+        let err = o.CreateDashboardOverlay(key, name, &mut main, null);
+        assert_eq!(err, E::RequestFailed);
+
+        // Nothing was created.
+        assert_eq!(count(), 1);
+        assert_eq!(o.FindOverlay(key, &mut handle), E::UnknownOverlay);
+    }
+
+    #[test]
+    fn raw_upload_is_refused() {
+        let o = overlay_man();
+        let h = create(&o, c"key");
+        let mut pixels = [0u8; 16];
+        let err = o.SetOverlayRaw(h, pixels.as_mut_ptr().cast(), 2, 2, 4);
+        assert_eq!(err, E::RequestFailed);
+        let err = o.SetOverlayRaw(h, std::ptr::null_mut(), 0, 0, 0);
+        assert_eq!(err, E::RequestFailed);
+        assert!(
+            o.overlays
+                .read()
+                .unwrap()
+                .values()
+                .all(|o| o.rect.is_none())
+        );
+    }
+
+    #[test]
+    fn wait_frame_sync_returns_immediately() {
+        let o = overlay_man();
+        assert_eq!(o.WaitFrameSync(0), E::None);
+        assert_eq!(o.WaitFrameSync(1000), E::None);
+    }
+
+    #[test]
+    fn pre_curve_pitch_setter_stub() {
+        let o = overlay_man();
+        let h = create(&o, c"key");
+        assert_eq!(o.SetOverlayPreCurvePitch(h, 0.5), E::None);
+    }
+
+    #[test]
+    fn set_overlay_name() {
+        let o = overlay_man();
+        let h = create(&o, c"key");
+        let name = |h| {
+            let overlays = o.overlays.read().unwrap();
+            overlays[OverlayKey::from(KeyData::from_ffi(h))]
+                .name
+                .clone()
+        };
+        assert_eq!(name(h), c"key".to_owned());
+
+        assert_eq!(o.SetOverlayName(h, c"Friendly name".as_ptr()), E::None);
+        assert_eq!(name(h), c"Friendly name".to_owned());
+
+        // Invalid arguments leave the name alone.
+        assert_eq!(o.SetOverlayName(h, std::ptr::null()), E::InvalidParameter);
+        let err = o.SetOverlayName(vr::k_ulOverlayHandleInvalid, c"other".as_ptr());
+        assert_eq!(err, E::UnknownOverlay);
+        assert_eq!(name(h), c"Friendly name".to_owned());
+
+        // The key is unaffected by renaming.
+        let mut found = vr::k_ulOverlayHandleInvalid;
+        assert_eq!(o.FindOverlay(c"key".as_ptr(), &mut found), E::None);
+        assert_eq!(found, h);
     }
 }
