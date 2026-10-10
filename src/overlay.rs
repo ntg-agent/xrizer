@@ -1014,10 +1014,16 @@ impl vr::IVROverlay028_Interface for OverlayMan {
     }
     fn GetOverlayMouseScale(
         &self,
-        _: vr::VROverlayHandle_t,
-        _: *mut vr::HmdVector2_t,
+        handle: vr::VROverlayHandle_t,
+        scale: *mut vr::HmdVector2_t,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayMouseScale");
+        get_overlay!(self, handle, _overlay);
+        if scale.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
+        unsafe { scale.write(vr::HmdVector2_t { v: [1.0, 1.0] }) };
+        vr::EVROverlayError::None
     }
     fn SetOverlayInputMethod(
         &self,
@@ -1033,10 +1039,16 @@ impl vr::IVROverlay028_Interface for OverlayMan {
     }
     fn GetOverlayInputMethod(
         &self,
-        _: vr::VROverlayHandle_t,
-        _: *mut vr::VROverlayInputMethod,
+        handle: vr::VROverlayHandle_t,
+        method: *mut vr::VROverlayInputMethod,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayInputMethod");
+        get_overlay!(self, handle, _overlay);
+        if method.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
+        unsafe { method.write(vr::VROverlayInputMethod::None) };
+        vr::EVROverlayError::None
     }
     fn PollNextOverlayEvent(
         &self,
@@ -1051,12 +1063,14 @@ impl vr::IVROverlay028_Interface for OverlayMan {
     }
     fn GetTransformForOverlayCoordinates(
         &self,
-        _: vr::VROverlayHandle_t,
+        handle: vr::VROverlayHandle_t,
         _: vr::ETrackingUniverseOrigin,
         _: vr::HmdVector2_t,
         _: *mut vr::HmdMatrix34_t,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetTransformForOverlayCoordinates");
+        get_overlay!(self, handle, _overlay);
+        vr::EVROverlayError::RequestFailed
     }
     fn IsOverlayVisible(&self, handle: vr::VROverlayHandle_t) -> bool {
         let overlays = self.overlays.read().unwrap();
@@ -1072,7 +1086,8 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         _x: f32,
         _y: f32,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("SetSubviewPosition");
+        vr::EVROverlayError::None
     }
     fn SetOverlayTransformProjection(
         &self,
@@ -1082,30 +1097,36 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         _: *const vr::VROverlayProjection_t,
         _: vr::EVREye,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("SetOverlayTransformProjection");
+        vr::EVROverlayError::None
     }
     fn GetOverlayTransformCursor(
         &self,
-        _: vr::VROverlayHandle_t,
+        handle: vr::VROverlayHandle_t,
         _: *mut vr::HmdVector2_t,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayTransformCursor");
+        get_overlay!(self, handle, _overlay);
+        vr::EVROverlayError::WrongTransformType
     }
     fn SetOverlayTransformCursor(
         &self,
         _: vr::VROverlayHandle_t,
         _: *const vr::HmdVector2_t,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("SetOverlayTransformCursor");
+        vr::EVROverlayError::None
     }
     fn GetOverlayTransformTrackedDeviceComponent(
         &self,
-        _: vr::VROverlayHandle_t,
+        handle: vr::VROverlayHandle_t,
         _: *mut vr::TrackedDeviceIndex_t,
         _: *mut c_char,
         _: u32,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayTransformTrackedDeviceComponent");
+        get_overlay!(self, handle, _overlay);
+        vr::EVROverlayError::WrongTransformType
     }
     fn SetOverlayTransformTrackedDeviceComponent(
         &self,
@@ -1113,15 +1134,18 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         _: vr::TrackedDeviceIndex_t,
         _: *const c_char,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("SetOverlayTransformTrackedDeviceComponent");
+        vr::EVROverlayError::None
     }
     fn GetOverlayTransformTrackedDeviceRelative(
         &self,
-        _: vr::VROverlayHandle_t,
+        handle: vr::VROverlayHandle_t,
         _: *mut vr::TrackedDeviceIndex_t,
         _: *mut vr::HmdMatrix34_t,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayTransformTrackedDeviceRelative");
+        get_overlay!(self, handle, _overlay);
+        vr::EVROverlayError::WrongTransformType
     }
     fn SetOverlayTransformTrackedDeviceRelative(
         &self,
@@ -1188,10 +1212,16 @@ impl vr::IVROverlay028_Interface for OverlayMan {
     }
     fn GetOverlayTransformType(
         &self,
-        _: vr::VROverlayHandle_t,
-        _: *mut vr::VROverlayTransformType,
+        handle: vr::VROverlayHandle_t,
+        transform_type: *mut vr::VROverlayTransformType,
     ) -> vr::EVROverlayError {
-        todo!()
+        get_overlay!(self, handle, _overlay);
+        if transform_type.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
+        // relative transforms are unimplemented, so the transform is always absolute
+        unsafe { transform_type.write(vr::VROverlayTransformType::Absolute) };
+        vr::EVROverlayError::None
     }
     fn GetOverlayTextureBounds(
         &self,
@@ -1526,7 +1556,8 @@ impl vr::IVROverlay021On024 for OverlayMan {
         _: *mut vr::HmdVector2_t,
         _: *mut f32,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayDualAnalogTransform (v1.8.19)");
+        vr::EVROverlayError::RequestFailed
     }
     fn SetOverlayDualAnalogTransform(
         &self,
@@ -1535,7 +1566,8 @@ impl vr::IVROverlay021On024 for OverlayMan {
         _: *const vr::HmdVector2_t,
         _: f32,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("SetOverlayDualAnalogTransform (v1.8.19)");
+        vr::EVROverlayError::None
     }
     fn SetOverlayRenderModel(
         &self,
@@ -1543,17 +1575,25 @@ impl vr::IVROverlay021On024 for OverlayMan {
         _: *const c_char,
         _: *const vr::HmdColor_t,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("SetOverlayRenderModel (v1.8.19)");
+        vr::EVROverlayError::None
     }
     fn GetOverlayRenderModel(
         &self,
         _: vr::VROverlayHandle_t,
-        _: *mut c_char,
-        _: u32,
+        value: *mut c_char,
+        size: u32,
         _: *mut vr::HmdColor_t,
-        _: *mut vr::EVROverlayError,
+        error: *mut vr::EVROverlayError,
     ) -> u32 {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayRenderModel (v1.8.19)");
+        if !value.is_null() && size > 0 {
+            unsafe { value.write(0) }
+        }
+        if let Some(error) = unsafe { error.as_mut() } {
+            *error = vr::EVROverlayError::None;
+        }
+        0
     }
 }
 
@@ -1563,7 +1603,8 @@ impl vr::IVROverlay020On021 for OverlayMan {
         _: vr::EOverlayDirection,
         _: vr::VROverlayHandle_t,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("MoveGamepadFocusToNeighbor (v1.7.15)");
+        vr::EVROverlayError::NoNeighbor
     }
     fn SetOverlayNeighbor(
         &self,
@@ -1571,13 +1612,16 @@ impl vr::IVROverlay020On021 for OverlayMan {
         _: vr::VROverlayHandle_t,
         _: vr::VROverlayHandle_t,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("SetOverlayNeighbor (v1.7.15)");
+        vr::EVROverlayError::None
     }
     fn SetGamepadFocusOverlay(&self, _: vr::VROverlayHandle_t) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("SetGamepadFocusOverlay (v1.7.15)");
+        vr::EVROverlayError::None
     }
     fn GetGamepadFocusOverlay(&self) -> vr::VROverlayHandle_t {
-        todo!()
+        crate::warn_unimplemented!("GetGamepadFocusOverlay (v1.7.15)");
+        vr::k_ulOverlayHandleInvalid
     }
     fn GetOverlayAutoCurveDistanceRangeInMeters(
         &self,
@@ -1618,7 +1662,8 @@ impl vr::IVROverlay017On018 for OverlayMan {
         _: vr::VROverlayHandle_t,
         _: vr::TrackedDeviceIndex_t,
     ) -> bool {
-        todo!()
+        crate::warn_unimplemented!("HandleControllerOverlayInteractionAsMouse (v1.0.11)");
+        false
     }
 }
 
@@ -1634,7 +1679,8 @@ impl vr::IVROverlay013On014 for OverlayMan {
         _: *mut vr::EGraphicsAPIConvention,
         _: *mut vr::EColorSpace,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayTexture (v1.0.3)");
+        vr::EVROverlayError::RequestFailed
     }
 }
 
@@ -1644,7 +1690,7 @@ impl vr::IVROverlay007On010 for OverlayMan {
         _: vr::VROverlayHandle_t,
         _: *mut vr::vr_0_9_12::VREvent_t,
     ) -> bool {
-        todo!()
+        false
     }
 }
 
@@ -1755,5 +1801,140 @@ mod tests {
         assert_eq!(o.SetOverlayCursor(h, cursor), E::None);
         assert_eq!(o.TriggerLaserMouseHapticVibration(h, 0., 0., 0.), E::None);
         assert!(!o.IsHoverTargetOverlay(h));
+    }
+
+    // transform, input method and legacy interface stubs
+
+    #[test]
+    fn input_and_transform_type_getters() {
+        let o = overlay_man();
+        let h = create(&o, c"key");
+        check_getter(h, [0.0f32; 2], [1.0; 2], |h, p| {
+            o.GetOverlayMouseScale(h, p.cast())
+        });
+        let (mouse, none) = (
+            vr::VROverlayInputMethod::Mouse,
+            vr::VROverlayInputMethod::None,
+        );
+        check_getter(h, mouse, none, |h, p| o.GetOverlayInputMethod(h, p));
+        let (invalid, absolute) = (
+            vr::VROverlayTransformType::Invalid,
+            vr::VROverlayTransformType::Absolute,
+        );
+        check_getter(h, invalid, absolute, |h, p| o.GetOverlayTransformType(h, p));
+    }
+
+    #[test]
+    fn unsupported_transform_stubs() {
+        let o = overlay_man();
+        let h = create(&o, c"key");
+        let null = std::ptr::null_mut::<c_void>();
+        // valid handle gives `want`, invalid handle UnknownOverlay; null outs are never written
+        let check = |want: E, get: &dyn Fn(vr::VROverlayHandle_t) -> E| {
+            assert_eq!(get(h), want);
+            assert_eq!(get(vr::k_ulOverlayHandleInvalid), E::UnknownOverlay);
+        };
+        let (origin, wrong) = (vr::ETrackingUniverseOrigin::Seated, E::WrongTransformType);
+        check(E::RequestFailed, &|h| {
+            o.GetTransformForOverlayCoordinates(h, origin, Default::default(), null.cast())
+        });
+        check(wrong, &|h| o.GetOverlayTransformCursor(h, null.cast()));
+        check(wrong, &|h| {
+            o.GetOverlayTransformTrackedDeviceComponent(h, null.cast(), null.cast(), 0)
+        });
+        check(wrong, &|h| {
+            o.GetOverlayTransformTrackedDeviceRelative(h, null.cast(), null.cast())
+        });
+    }
+
+    #[test]
+    fn transform_setter_stubs() {
+        let o = overlay_man();
+        let h = create(&o, c"key");
+        let null = std::ptr::null::<c_void>();
+        assert_eq!(o.SetSubviewPosition(h, 0.5, 0.5), E::None);
+        let origin = vr::ETrackingUniverseOrigin::Seated;
+        let eye = vr::EVREye::Left;
+        let err = o.SetOverlayTransformProjection(h, origin, null.cast(), null.cast(), eye);
+        assert_eq!(err, E::None);
+        assert_eq!(o.SetOverlayTransformCursor(h, null.cast()), E::None);
+        let err = o.SetOverlayTransformTrackedDeviceComponent(h, 0, c"handle".as_ptr());
+        assert_eq!(err, E::None);
+    }
+
+    #[test]
+    fn legacy_overlay_stubs() {
+        let o = overlay_man();
+        let h = create(&o, c"key");
+        let null = std::ptr::null_mut::<c_void>();
+
+        let (which, mut center, mut radius) = (vr::EDualAnalogWhich::Left, Default::default(), 7.0);
+        let err = <OverlayMan as vr::IVROverlay021On024>::GetOverlayDualAnalogTransform(
+            &o,
+            h,
+            which,
+            &mut center,
+            &mut radius,
+        );
+        assert_eq!((err, radius), (E::RequestFailed, 7.0));
+        let err = <OverlayMan as vr::IVROverlay021On024>::SetOverlayDualAnalogTransform(
+            &o, h, which, &center, radius,
+        );
+        assert_eq!(err, E::None);
+        let err = <OverlayMan as vr::IVROverlay021On024>::SetOverlayRenderModel(
+            &o,
+            h,
+            c"model".as_ptr(),
+            null.cast(),
+        );
+        assert_eq!(err, E::None);
+        let (mut name, mut err) = ([1 as c_char; 2], E::RequestFailed);
+        let len = <OverlayMan as vr::IVROverlay021On024>::GetOverlayRenderModel(
+            &o,
+            h,
+            name.as_mut_ptr(),
+            2,
+            null.cast(),
+            &mut err,
+        );
+        assert_eq!((len, name, err), (0, [0, 1], E::None));
+        let len = <OverlayMan as vr::IVROverlay021On024>::GetOverlayRenderModel(
+            &o,
+            h,
+            null.cast(),
+            2,
+            null.cast(),
+            null.cast(),
+        );
+        assert_eq!(len, 0);
+
+        let dir = vr::EOverlayDirection::Up;
+        let err = <OverlayMan as vr::IVROverlay020On021>::MoveGamepadFocusToNeighbor(&o, dir, h);
+        assert_eq!(err, E::NoNeighbor);
+        let err = <OverlayMan as vr::IVROverlay020On021>::SetOverlayNeighbor(&o, dir, h, h);
+        assert_eq!(err, E::None);
+        let err = <OverlayMan as vr::IVROverlay020On021>::SetGamepadFocusOverlay(&o, h);
+        assert_eq!(err, E::None);
+        let focus = <OverlayMan as vr::IVROverlay020On021>::GetGamepadFocusOverlay(&o);
+        assert_eq!(focus, vr::k_ulOverlayHandleInvalid);
+
+        let mouse =
+            <OverlayMan as vr::IVROverlay017On018>::HandleControllerOverlayInteractionAsMouse;
+        assert!(!mouse(&o, h, 1));
+        let mut width = 7u32;
+        let err = <OverlayMan as vr::IVROverlay013On014>::GetOverlayTexture(
+            &o,
+            h,
+            null.cast(),
+            null,
+            &mut width,
+            null.cast(),
+            null.cast(),
+            null.cast(),
+            null.cast(),
+        );
+        assert_eq!((err, width), (E::RequestFailed, 7));
+        let poll = <OverlayMan as vr::IVROverlay007On010>::PollNextOverlayEvent;
+        assert!(!poll(&o, h, null.cast()));
     }
 }
