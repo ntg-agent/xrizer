@@ -27,8 +27,13 @@ pub struct VulkanData {
 
 impl Drop for VulkanData {
     fn drop(&mut self) {
-        unsafe {
-            self.device.device_wait_idle().unwrap();
+        // This can fail with ERROR_DEVICE_LOST if the driver reset or the GPU went away, which
+        // can happen at app exit. Objects of a lost device can still be destroyed (the spec expects
+        // that), so log it and carry on destroying what we own instead of panicking. We do the
+        // same for the out of memory errors it can also return: the only alternatives are
+        // aborting the app (what panicking does) or leaking the handles.
+        if let Err(e) = unsafe { self.device.device_wait_idle() } {
+            warn!("vkDeviceWaitIdle failed during cleanup: {e:?}");
         }
         match &self.real_data {
             // Temporary session - we created these handles, so let's destroy them
@@ -908,5 +913,22 @@ fn new_entry() -> ash::Entry {
         ash::Entry::from_static_fn(ash::StaticFn {
             get_instance_proc_addr: fakexr::vulkan::get_instance_proc_addr,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::clientcore::Injector;
+    use crate::openxr_data::{FakeCompositor, OpenXrData};
+
+    #[test]
+    fn drop_does_not_panic_when_device_is_lost() {
+        crate::init_logging();
+        let xr = OpenXrData::<FakeCompositor>::new(&Injector::default()).unwrap();
+        let vk = VulkanData::new_temporary(&xr.instance, xr.system_id);
+
+        fakexr::vulkan::fail_next_device_wait_idle(vk::Result::ERROR_DEVICE_LOST);
+        drop(vk);
     }
 }
