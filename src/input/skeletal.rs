@@ -673,6 +673,90 @@ pub(super) enum HandSkeletonBone {
     Count,
 }
 
+/// The parent of each bone in the hand skeleton, indexed by [`HandSkeletonBone`].
+/// The root bone has no parent. This is the hierarchy of the hand skeleton shipped with SteamVR
+/// (`resources/skeletons/vr_glove_*_skeleton`).
+pub(super) static BONE_PARENTS: [vr::BoneIndex_t; HandSkeletonBone::Count as usize] = [
+    vr::k_unInvalidBoneIndex, // Root
+    Root as _,                // Wrist
+    Wrist as _,               // Thumb0
+    Thumb0 as _,              // Thumb1
+    Thumb1 as _,              // Thumb2
+    Thumb2 as _,              // Thumb3
+    Wrist as _,               // IndexFinger0
+    IndexFinger0 as _,        // IndexFinger1
+    IndexFinger1 as _,        // IndexFinger2
+    IndexFinger2 as _,        // IndexFinger3
+    IndexFinger3 as _,        // IndexFinger4
+    Wrist as _,               // MiddleFinger0
+    MiddleFinger0 as _,       // MiddleFinger1
+    MiddleFinger1 as _,       // MiddleFinger2
+    MiddleFinger2 as _,       // MiddleFinger3
+    MiddleFinger3 as _,       // MiddleFinger4
+    Wrist as _,               // RingFinger0
+    RingFinger0 as _,         // RingFinger1
+    RingFinger1 as _,         // RingFinger2
+    RingFinger2 as _,         // RingFinger3
+    RingFinger3 as _,         // RingFinger4
+    Wrist as _,               // PinkyFinger0
+    PinkyFinger0 as _,        // PinkyFinger1
+    PinkyFinger1 as _,        // PinkyFinger2
+    PinkyFinger2 as _,        // PinkyFinger3
+    PinkyFinger3 as _,        // PinkyFinger4
+    Root as _,                // AuxThumb
+    Root as _,                // AuxIndexFinger
+    Root as _,                // AuxMiddleFinger
+    Root as _,                // AuxRingFinger
+    Root as _,                // AuxPinkyFinger
+];
+
+/// The names of the bones, indexed by [`HandSkeletonBone`], as they are named in the hand skeleton
+/// shipped with SteamVR (`resources/skeletons/vr_glove_*_skeleton`).
+/// `{}` is replaced by the hand: `l` or `r`.
+static BONE_NAMES: [&str; HandSkeletonBone::Count as usize] = [
+    "Root",
+    "wrist_{}",
+    "finger_thumb_0_{}",
+    "finger_thumb_1_{}",
+    "finger_thumb_2_{}",
+    "finger_thumb_{}_end",
+    "finger_index_meta_{}",
+    "finger_index_0_{}",
+    "finger_index_1_{}",
+    "finger_index_2_{}",
+    "finger_index_{}_end",
+    "finger_middle_meta_{}",
+    "finger_middle_0_{}",
+    "finger_middle_1_{}",
+    "finger_middle_2_{}",
+    "finger_middle_{}_end",
+    "finger_ring_meta_{}",
+    "finger_ring_0_{}",
+    "finger_ring_1_{}",
+    "finger_ring_2_{}",
+    "finger_ring_{}_end",
+    "finger_pinky_meta_{}",
+    "finger_pinky_0_{}",
+    "finger_pinky_1_{}",
+    "finger_pinky_2_{}",
+    "finger_pinky_{}_end",
+    "finger_thumb_{}_aux",
+    "finger_index_{}_aux",
+    "finger_middle_{}_aux",
+    "finger_ring_{}_aux",
+    "finger_pinky_{}_aux",
+];
+
+/// Returns the name of the bone with the given index, or `None` if there is no such bone.
+pub(super) fn bone_name(bone: vr::BoneIndex_t, hand: Hand) -> Option<String> {
+    let name = BONE_NAMES.get(usize::try_from(bone).ok()?)?;
+    let side = match hand {
+        Hand::Left => "l",
+        Hand::Right => "r",
+    };
+    Some(name.replace("{}", side))
+}
+
 macro_rules! skeletal_input_actions {
     ($($field:ident: $ty:ty),+$(,)?) => {
         pub struct SkeletalInputActions {

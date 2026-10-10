@@ -381,7 +381,9 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         _: u32,
         _: *mut vr::RenderModel_ComponentState_t,
     ) -> vr::EVRInputError {
-        todo!()
+        // GetActionBindingInfo never reports any bindings, so there is no component to describe.
+        crate::warn_unimplemented!("GetComponentStateForBinding");
+        vr::EVRInputError::NoData
     }
     fn ShowBindingsForActionSet(
         &self,
@@ -390,14 +392,16 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         _: u32,
         _: vr::VRInputValueHandle_t,
     ) -> vr::EVRInputError {
-        todo!()
+        crate::warn_unimplemented!("ShowBindingsForActionSet");
+        vr::EVRInputError::None
     }
     fn ShowActionOrigins(
         &self,
         _: vr::VRActionSetHandle_t,
         _: vr::VRActionHandle_t,
     ) -> vr::EVRInputError {
-        todo!()
+        crate::warn_unimplemented!("ShowActionOrigins");
+        vr::EVRInputError::None
     }
     fn GetActionBindingInfo(
         &self,
@@ -514,7 +518,9 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         _: *mut vr::VRBoneTransform_t,
         _: u32,
     ) -> vr::EVRInputError {
-        todo!()
+        // We never produce compressed skeletal data, so there is nothing we can decode.
+        crate::warn_unimplemented!("DecompressSkeletalBoneData");
+        vr::EVRInputError::InvalidCompressedData
     }
     fn GetSkeletalBoneDataCompressed(
         &self,
@@ -522,9 +528,13 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         _: vr::EVRSkeletalMotionRange,
         _: *mut c_void,
         _: u32,
-        _: *mut u32,
+        required_compressed_size: *mut u32,
     ) -> vr::EVRInputError {
-        todo!()
+        crate::warn_unimplemented!("GetSkeletalBoneDataCompressed");
+        if let Some(size) = unsafe { required_compressed_size.as_mut() } {
+            *size = 0;
+        }
+        vr::EVRInputError::NoData
     }
     fn GetSkeletalSummaryData(
         &self,
@@ -628,20 +638,62 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
     }
     fn GetBoneName(
         &self,
-        _: vr::VRActionHandle_t,
-        _: vr::BoneIndex_t,
-        _: *mut c_char,
-        _: u32,
+        handle: vr::VRActionHandle_t,
+        bone: vr::BoneIndex_t,
+        name: *mut c_char,
+        name_size: u32,
     ) -> vr::EVRInputError {
-        todo!()
+        get_action_from_handle!(self, handle, session_data, action);
+        let ActionData::Skeleton(hand) = action else {
+            return vr::EVRInputError::WrongType;
+        };
+
+        if name.is_null() {
+            return vr::EVRInputError::InvalidParam;
+        }
+
+        let Some(bone_name) = skeletal::bone_name(bone, *hand) else {
+            return vr::EVRInputError::InvalidBoneIndex;
+        };
+
+        let bone_name = bone_name.as_bytes();
+        if (name_size as usize) <= bone_name.len() {
+            return vr::EVRInputError::BufferTooSmall;
+        }
+
+        let out = unsafe { std::slice::from_raw_parts_mut(name.cast::<u8>(), bone_name.len() + 1) };
+        out[..bone_name.len()].copy_from_slice(bone_name);
+        out[bone_name.len()] = 0;
+
+        vr::EVRInputError::None
     }
     fn GetBoneHierarchy(
         &self,
-        _: vr::VRActionHandle_t,
-        _: *mut vr::BoneIndex_t,
-        _: u32,
+        handle: vr::VRActionHandle_t,
+        parent_indices: *mut vr::BoneIndex_t,
+        parent_indices_count: u32,
     ) -> vr::EVRInputError {
-        todo!()
+        get_action_from_handle!(self, handle, session_data, action);
+        if !matches!(action, ActionData::Skeleton { .. }) {
+            return vr::EVRInputError::WrongType;
+        }
+
+        if parent_indices.is_null() {
+            return vr::EVRInputError::InvalidParam;
+        }
+        if parent_indices_count < skeletal::HandSkeletonBone::Count as u32 {
+            return vr::EVRInputError::BufferTooSmall;
+        }
+
+        let parents = unsafe {
+            std::slice::from_raw_parts_mut(
+                parent_indices,
+                skeletal::HandSkeletonBone::Count as usize,
+            )
+        };
+        parents.copy_from_slice(&skeletal::BONE_PARENTS);
+
+        vr::EVRInputError::None
     }
     fn GetBoneCount(&self, handle: vr::VRActionHandle_t, count: *mut u32) -> vr::EVRInputError {
         get_action_from_handle!(self, handle, session_data, action);
@@ -1270,7 +1322,9 @@ impl<C: openxr_data::Compositor> vr::IVRInput004On005 for Input<C> {
         _transform_array: *mut vr::VRBoneTransform_t,
         _transform_array_count: u32,
     ) -> vr::EVRInputError {
-        todo!()
+        // We never produce compressed skeletal data, so there is nothing we can decode.
+        crate::warn_unimplemented!("DecompressSkeletalBoneData (v1.0.17)");
+        vr::EVRInputError::InvalidCompressedData
     }
 
     #[inline]
@@ -1343,10 +1397,14 @@ impl<C: openxr_data::Compositor> vr::IVRInput004On005 for Input<C> {
         _motion_range: vr::EVRSkeletalMotionRange,
         _compressed_data: *mut c_void,
         _compressed_size: u32,
-        _required_compressed_size: *mut u32,
+        required_compressed_size: *mut u32,
         _restrict_to_device: vr::VRInputValueHandle_t,
     ) -> vr::EVRInputError {
-        todo!()
+        crate::warn_unimplemented!("GetSkeletalBoneDataCompressed (v1.0.17)");
+        if let Some(size) = unsafe { required_compressed_size.as_mut() } {
+            *size = 0;
+        }
+        vr::EVRInputError::NoData
     }
 }
 
