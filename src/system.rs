@@ -1271,7 +1271,7 @@ impl vr::IVRSystem009On011 for System {
             self,
             origin,
             &mut e,
-            std::mem::size_of_val(&event) as u32,
+            std::mem::size_of_val(&e) as u32,
             pose,
         );
 
@@ -1284,21 +1284,11 @@ impl vr::IVRSystem009On011 for System {
                 return false;
             };
             event.trackedDeviceIndex = e.trackedDeviceIndex;
-            event.data = match e.eventType {
-                x if x == vr::EVREventType::ButtonPress as u32
-                    || x == vr::EVREventType::ButtonUnpress as u32
-                    || x == vr::EVREventType::ButtonTouch as u32
-                    || x == vr::EVREventType::ButtonUntouch as u32 =>
-                {
-                    vr::vr_0_9_12::VREvent_Data_t {
-                        controller: unsafe { e.data.controller },
-                    }
-                }
-                other => {
-                    error!("Unhandled event type data for 0.9.12: {other:?}");
-                    return false;
-                }
-            }
+            // The only data we ever write to an event is the controller one, which is all zeroes for
+            // events that carry no data.
+            event.data = vr::vr_0_9_12::VREvent_Data_t {
+                controller: unsafe { e.data.controller },
+            };
         }
 
         ret
@@ -1675,6 +1665,48 @@ mod tests {
             vr::EDeviceActivityLevel::UserInteraction
         );
         assert_eq!(f.poll_events(), [(STARTED, hmd)]);
+    }
+
+    #[test]
+    fn legacy_poll_next_event() {
+        use vr::IVRSystem009On011 as Legacy;
+        type Event = vr::vr_0_9_12::VREvent_t;
+        let ended = vr::EVREventType::TrackedDeviceUserInteractionEnded;
+        let started = vr::EVREventType::TrackedDeviceUserInteractionStarted;
+        let hmd = vr::k_unTrackedDeviceIndex_Hmd;
+        let f = PresenceFixture::new();
+        f.poll_events();
+
+        let poll = |event| Legacy::PollNextEvent(&f.system, event);
+        let poll_with_pose = |event, pose| {
+            Legacy::PollNextEventWithPose(
+                &f.system,
+                vr::ETrackingUniverseOrigin::Seated,
+                event,
+                pose,
+            )
+        };
+
+        // The old interface has no size argument, so the event must still be returned.
+        let mut event = unsafe { std::mem::zeroed::<Event>() };
+        assert!(!poll(&mut event));
+        f.set_user_present(false);
+        assert!(poll(&mut event));
+        assert_eq!(event.eventType, ended);
+        assert_eq!(event.trackedDeviceIndex, hmd);
+        assert!(!poll(&mut event));
+
+        f.set_user_present(true);
+        let mut pose = vr::TrackedDevicePose_t::default();
+        assert!(poll_with_pose(&mut event, &mut pose));
+        assert_eq!(event.eventType, started);
+        assert_eq!(event.trackedDeviceIndex, hmd);
+        assert!(pose.bDeviceIsConnected);
+
+        // Neither the event nor the pose are required.
+        f.set_user_present(false);
+        assert!(poll_with_pose(std::ptr::null_mut(), std::ptr::null_mut()));
+        assert!(!poll(&mut event));
     }
 
     #[test]
