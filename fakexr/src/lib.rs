@@ -189,6 +189,26 @@ pub fn fail_next_swapchain_acquire(result: xr::Result) {
     FAIL_NEXT_SWAPCHAIN_ACQUIRE.set(Some(result));
 }
 
+/// Sets the fov that xrLocateViews reports for both views. Defaults to a valid, symmetric fov.
+pub fn set_view_fov(session: xr::Session, fov: xr::Fovf) {
+    let session = session.to_handle().unwrap();
+    session.view_fov.store(fov);
+}
+
+/// A composition layer passed to xrEndFrame.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SubmittedLayer {
+    pub ty: xr::StructureType,
+    /// The fov of each view, if this is a projection layer. Always empty under miri, see end_frame.
+    pub view_fovs: Vec<xr::Fovf>,
+}
+
+/// The layers passed to the last xrEndFrame call on this session.
+pub fn session_last_frame_layers(session: xr::Session) -> Vec<SubmittedLayer> {
+    let session = session.to_handle().unwrap();
+    session.last_frame_layers.lock().unwrap().clone()
+}
+
 macro_rules! fn_unimplemented_impl {
     ($($param:ident),+) => {
         fn_unimplemented_impl!($($param),+  -> []);
@@ -566,6 +586,8 @@ struct Session {
     state_synced: AtomicBool,
     should_render: AtomicBool,
     frame_state: AtomicCell<FrameState>,
+    last_frame_layers: Mutex<Vec<SubmittedLayer>>,
+    view_fov: AtomicCell<xr::Fovf>,
     with_trackers: AtomicBool,
 }
 
@@ -910,6 +932,14 @@ extern "system" fn create_session(
         state_synced: true.into(),
         should_render: false.into(),
         frame_state: FrameState::Ended.into(),
+        last_frame_layers: Default::default(),
+        view_fov: xr::Fovf {
+            angle_left: -0.8,
+            angle_right: 0.8,
+            angle_up: 0.8,
+            angle_down: -0.8,
+        }
+        .into(),
         with_trackers: false.into(),
     });
 
@@ -1757,11 +1787,38 @@ extern "system" fn begin_frame(
     xr::Result::SUCCESS
 }
 
-extern "system" fn end_frame(session: xr::Session, _info: *const xr::FrameEndInfo) -> xr::Result {
+extern "system" fn end_frame(session: xr::Session, info: *const xr::FrameEndInfo) -> xr::Result {
     let session = get_handle!(session);
     if let Err(e) = transition_frame_state(&session.frame_state, FrameState::Ended) {
         return e;
     }
+    let info = unsafe { info.as_ref().unwrap() };
+    let layers = if info.layer_count > 0 {
+        unsafe { std::slice::from_raw_parts(info.layers, info.layer_count as usize) }
+    } else {
+        &[]
+    };
+    *session.last_frame_layers.lock().unwrap() = layers
+        .iter()
+        .map(|&layer| unsafe {
+            let ty = (*layer).ty;
+            // The openxr crate only hands us a reference to the header of each layer, so miri
+            // does not let us read the rest of a projection layer through that pointer.
+            #[cfg(not(miri))]
+            let view_fovs = if ty == xr::CompositionLayerProjection::TYPE {
+                let layer = &*(layer as *const xr::CompositionLayerProjection);
+                std::slice::from_raw_parts(layer.views, layer.view_count as usize)
+                    .iter()
+                    .map(|view| view.fov)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            #[cfg(miri)]
+            let view_fovs = Vec::new();
+            SubmittedLayer { ty, view_fovs }
+        })
+        .collect();
     if session.state.load() == xr::SessionState::READY {
         session.synchronized();
     }
@@ -1776,7 +1833,7 @@ extern "system" fn locate_views(
     output: *mut u32,
     views: *mut xr::View,
 ) -> xr::Result {
-    let _session = get_handle!(session);
+    let session = get_handle!(session);
     if let Some(result) = LOCATE_VIEWS_FAILURE.get() {
         return result;
     }
@@ -1804,7 +1861,7 @@ extern "system" fn locate_views(
             ty: xr::View::TYPE,
             next: std::ptr::null_mut(),
             pose: xr::Posef::default(),
-            fov: xr::Fovf::default(),
+            fov: session.view_fov.load(),
         };
         views[0] = view;
         views[1] = view;

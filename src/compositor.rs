@@ -1417,8 +1417,19 @@ impl<G: GraphicsBackend> FrameController<G> {
 
             let crate::system::ViewData { flags, views } =
                 system.get_views(session_data.current_origin_as_reference_space());
+            // The fov has to be valid for the runtime to accept the projection layer.
+            // Check it before the vertical flip below, which swaps the up and down angles.
+            let views: &[xr::View] = if views.iter().all(|view| is_valid_fov(view.fov)) {
+                &views
+            } else {
+                crate::warn_once!(
+                    "Runtime reported an invalid fov ({:?}) - not submitting a projection layer",
+                    views.map(|view| view.fov)
+                );
+                &[]
+            };
             proj_layer_views = views
-                .into_iter()
+                .iter()
                 .enumerate()
                 .map(|(eye_index, view)| {
                     let pose = xr::Posef {
@@ -1501,6 +1512,17 @@ where
         && current.height >= new.height
         && current.array_size == new.array_size
         && current.sample_count == new.sample_count
+}
+
+/// A fov is valid if all of its angles are finite and it has a positive extent in both directions.
+fn is_valid_fov(fov: xr::Fovf) -> bool {
+    let xr::Fovf {
+        angle_left: left,
+        angle_right: right,
+        angle_up: up,
+        angle_down: down,
+    } = fov;
+    [left, right, up, down].iter().all(|a| a.is_finite()) && left < right && down < up
 }
 
 fn is_valid_swapchain_info<G: xr::Graphics>(info: &xr::SwapchainCreateInfo<G>) -> bool {
@@ -1712,6 +1734,31 @@ mod tests {
         fn check_frame_state(&self, state: fakexr::FrameState) {
             let session = self.comp.openxr.session_data.get().session.as_raw();
             assert_eq!(fakexr::session_frame_state(session), state);
+        }
+
+        /// Makes the runtime report this fov for all views. Takes effect from the next WaitGetPoses.
+        fn set_view_fov(&self, fov: xr::Fovf) {
+            let session = self.comp.openxr.session_data.get().session.as_raw();
+            fakexr::set_view_fov(session, fov);
+        }
+
+        /// Submits a frame with explicit timing and returns the layers the runtime received for it.
+        fn submit_frame(
+            &self,
+            bounds: *const vr::VRTextureBounds_t,
+        ) -> Vec<fakexr::SubmittedLayer> {
+            assert_eq!(self.wait_get_poses(), None);
+            assert_eq!(self.comp.SubmitExplicitTimingData(), None);
+            for eye in [vr::EVREye::Left, vr::EVREye::Right] {
+                let texture = FakeGraphicsData::texture(&self.vk);
+                let flags = vr::EVRSubmitFlags::Default;
+                assert_eq!(self.comp.Submit(eye, &texture, bounds, flags), None);
+            }
+            self.comp.PostPresentHandoff();
+            self.check_frame_state(fakexr::FrameState::Ended);
+
+            let session = self.comp.openxr.session_data.get().session.as_raw();
+            fakexr::session_last_frame_layers(session)
         }
     }
 
@@ -2259,6 +2306,125 @@ mod tests {
             .expect("Swapchain data is missing");
         assert_eq!(data.initial_format, 1);
         assert_eq!(data.info.format, 0);
+    }
+
+    const PROJECTION_LAYER: xr::sys::StructureType = xr::sys::CompositionLayerProjection::TYPE;
+
+    fn projection_layer(fov: xr::Fovf) -> fakexr::SubmittedLayer {
+        fakexr::SubmittedLayer {
+            ty: PROJECTION_LAYER,
+            view_fovs: vec![fov, fov],
+        }
+    }
+
+    fn layer_types(layers: &[fakexr::SubmittedLayer]) -> Vec<xr::sys::StructureType> {
+        layers.iter().map(|layer| layer.ty).collect()
+    }
+
+    /// An explicit timing fixture whose session has been running long enough for the runtime to
+    /// ask for rendering.
+    fn rendering_fixture() -> Fixture {
+        let f = Fixture::new();
+        f.comp.SetExplicitTimingMode(
+            vr::EVRCompositorTimingMode::Explicit_ApplicationPerformsPostPresentHandoff,
+        );
+        f.ensure_real_session(true);
+        f
+    }
+
+    // miri can't read the fovs that fakexr received, see fakexr::SubmittedLayer
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn projection_layer_with_valid_fov() {
+        let f = rendering_fixture();
+        let fov = xr::Fovf {
+            angle_left: -0.7,
+            angle_right: 0.9,
+            angle_up: 0.6,
+            angle_down: -0.8,
+        };
+        f.set_view_fov(fov);
+
+        assert_eq!(f.submit_frame(std::ptr::null()), [projection_layer(fov)]);
+
+        // The vertical flip is applied by swapping the fov angles, which must not be mistaken
+        // for an invalid fov.
+        let flipped_bounds = vr::VRTextureBounds_t {
+            uMin: 0.0,
+            uMax: 1.0,
+            vMin: 1.0,
+            vMax: 0.0,
+        };
+        let flipped_fov = xr::Fovf {
+            angle_up: fov.angle_down,
+            angle_down: fov.angle_up,
+            ..fov
+        };
+        assert_eq!(
+            f.submit_frame(&flipped_bounds),
+            [projection_layer(flipped_fov)]
+        );
+    }
+
+    #[test]
+    fn no_projection_layer_with_invalid_fov() {
+        let f = rendering_fixture();
+        let valid_fov = xr::Fovf {
+            angle_left: -0.8,
+            angle_right: 0.8,
+            angle_up: 0.8,
+            angle_down: -0.8,
+        };
+        let invalid_fovs = [
+            // what a runtime without valid views yet can report
+            ("zero", xr::Fovf::default()),
+            (
+                "nan",
+                xr::Fovf {
+                    angle_left: f32::NAN,
+                    ..valid_fov
+                },
+            ),
+            (
+                "infinite",
+                xr::Fovf {
+                    angle_up: f32::INFINITY,
+                    ..valid_fov
+                },
+            ),
+            (
+                "horizontally inverted",
+                xr::Fovf {
+                    angle_left: valid_fov.angle_right,
+                    angle_right: valid_fov.angle_left,
+                    ..valid_fov
+                },
+            ),
+            (
+                "vertically inverted",
+                xr::Fovf {
+                    angle_up: valid_fov.angle_down,
+                    angle_down: valid_fov.angle_up,
+                    ..valid_fov
+                },
+            ),
+        ];
+
+        // Make sure we are actually rendering, so that a missing layer is due to the fov.
+        f.set_view_fov(valid_fov);
+        let layers = f.submit_frame(std::ptr::null());
+        assert_eq!(layer_types(&layers), [PROJECTION_LAYER]);
+
+        for (name, fov) in invalid_fovs {
+            f.set_view_fov(fov);
+            let layers = f.submit_frame(std::ptr::null());
+            assert!(layers.is_empty(), "{name} fov was submitted: {layers:?}");
+
+            // The projection layer comes back once the runtime reports a valid fov.
+            f.set_view_fov(valid_fov);
+            let layers = f.submit_frame(std::ptr::null());
+            assert_eq!(layer_types(&layers), [PROJECTION_LAYER], "after {name} fov");
+        }
     }
 
     #[test]
