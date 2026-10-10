@@ -2155,3 +2155,106 @@ fn update_action_state_runtime_failure() {
         ..Default::default()
     });
 }
+
+#[test]
+fn action_data_runtime_failure() {
+    let mut f = Fixture::new();
+    let set1 = f.get_action_set_handle(c"/actions/set1");
+    let boolact = f.get_action_handle(c"/actions/set1/in/boolact");
+    let vec1act = f.get_action_handle(c"/actions/set1/in/vec1act");
+    let vec2act = f.get_action_handle(c"/actions/set1/in/vec2act");
+    let skeleton = f.get_action_handle(c"/actions/set1/in/skellyl");
+    f.load_actions(c"actions.json");
+
+    fakexr::set_action_state(
+        f.get_action::<bool>(boolact),
+        fakexr::ActionState::Bool(true),
+        LeftHand,
+    );
+    fakexr::set_action_state(
+        f.get_action::<f32>(vec1act),
+        fakexr::ActionState::Float(0.5),
+        LeftHand,
+    );
+    fakexr::set_action_state(
+        f.get_action::<xr::Vector2f>(vec2act),
+        fakexr::ActionState::Vector2(0.25, 0.75),
+        LeftHand,
+    );
+    f.sync(vr::VRActiveActionSet_t {
+        ulActionSet: set1,
+        ..Default::default()
+    });
+
+    let analog = |action| {
+        let mut state = vr::InputAnalogActionData_t::default();
+        let err = f.input.GetAnalogActionData(
+            action,
+            &mut state,
+            std::mem::size_of_val(&state) as u32,
+            0,
+        );
+        assert_eq!(err, vr::EVRInputError::None);
+        state
+    };
+    let skeletal_active = || {
+        let mut state = vr::InputSkeletalActionData_t::default();
+        let err = vr::IVRInput010_Interface::GetSkeletalActionData(
+            &*f.input,
+            skeleton,
+            &mut state,
+            std::mem::size_of_val(&state) as u32,
+        );
+        assert_eq!(err, vr::EVRInputError::None);
+        state.bActive
+    };
+    let state = f.get_bool_state(boolact).unwrap();
+    assert!(state.bActive && state.bState);
+    let state = analog(vec1act);
+    assert!(state.bActive && state.x == 0.5);
+    let state = analog(vec2act);
+    assert!(state.bActive && state.x == 0.25 && state.y == 0.75);
+    assert!(skeletal_active());
+
+    // The runtime failing to get an action state must not abort the game. The actions are
+    // inactive then.
+    fail_call(fakexr::Call::GetActionState, SESSION_LOST);
+    let state = f.get_bool_state(boolact).unwrap();
+    assert!(!state.bActive && !state.bState);
+    for action in [vec1act, vec2act] {
+        let state = analog(action);
+        assert!(!state.bActive);
+        assert_eq!((state.x, state.y), (0.0, 0.0));
+    }
+    assert!(!skeletal_active());
+
+    // The skeleton is estimated from the actions if there are no controllers.
+    let mut bones = [vr::VRBoneTransform_t::default(); 31];
+    assert_eq!(
+        vr::IVRInput011_Interface::GetSkeletalBoneData(
+            &*f.input,
+            skeleton,
+            vr::EVRSkeletalTransformSpace::Parent,
+            vr::EVRSkeletalMotionRange::WithController,
+            bones.as_mut_ptr(),
+            bones.len() as u32,
+        ),
+        vr::EVRInputError::None
+    );
+    let mut summary = vr::VRSkeletalSummaryData_t::default();
+    assert_eq!(
+        vr::IVRInput010_Interface::GetSkeletalSummaryData(
+            &*f.input,
+            skeleton,
+            vr::EVRSummaryType::FromAnimation,
+            &mut summary
+        ),
+        vr::EVRInputError::None
+    );
+
+    restore_call(fakexr::Call::GetActionState);
+    let state = f.get_bool_state(boolact).unwrap();
+    assert!(state.bActive && state.bState);
+    assert_eq!(analog(vec1act).x, 0.5);
+    assert!(skeletal_active());
+}

@@ -103,6 +103,24 @@ impl<T> Drop for WriteOnDrop<T> {
     }
 }
 
+/// Gets the state of an action. If the runtime fails to (the session is lost, for example), the
+/// failure is logged once and the action is reported as inactive.
+fn state_or_inactive<T: xr::ActionInput + Default, G>(
+    action: &xr::Action<T>,
+    session: &xr::Session<G>,
+    subaction_path: xr::Path,
+) -> xr::ActionState<T> {
+    action.state(session, subaction_path).unwrap_or_else(|err| {
+        crate::warn_once!("Failed to get action state: {}", err);
+        xr::ActionState {
+            current_state: T::default(),
+            changed_since_last_sync: false,
+            last_change_time: xr::Time::from_nanos(0),
+            is_active: false,
+        }
+    })
+}
+
 impl<C: openxr_data::Compositor> Input<C> {
     pub fn new(openxr: Arc<OpenXrData<C>>) -> Self {
         let mut map = SlotMap::with_key();
@@ -790,13 +808,15 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             Err(e) => return e,
         };
         let pose_data = data.input_data.pose_data.get().unwrap();
+        let active = pose_data
+            .grip
+            .is_active(&data.session, xr::Path::NULL)
+            .unwrap_or_else(|err| {
+                crate::warn_once!("Failed to get pose action state: {}", err);
+                false
+            });
         unsafe {
-            std::ptr::addr_of_mut!((*action_data).bActive).write(
-                pose_data
-                    .grip
-                    .is_active(&data.session, xr::Path::NULL)
-                    .unwrap(),
-            );
+            std::ptr::addr_of_mut!((*action_data).bActive).write(active);
             std::ptr::addr_of_mut!((*action_data).activeOrigin).write(origin);
         }
         vr::EVRInputError::None
@@ -983,7 +1003,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         let mut active_hand = restrict_to_device;
         let (state, delta) = match action {
             ActionData::Vector1 { action, last_value } => {
-                let mut state = action.state(&session_data.session, subaction_path).unwrap();
+                let mut state = state_or_inactive(action, &session_data.session, subaction_path);
 
                 // It's generally not clear how SteamVR handles float actions with multiple bindings;
                 //   so emulate OpenXR, which takes maximum among active actions
@@ -1024,7 +1044,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
                 )
             }
             ActionData::Vector2 { action, last_value } => {
-                let state = action.state(&session_data.session, subaction_path).unwrap();
+                let state = state_or_inactive(action, &session_data.session, subaction_path);
                 let delta = xr::Vector2f {
                     x: state.current_state.x - last_value.0.swap(state.current_state.x),
                     y: state.current_state.y - last_value.1.swap(state.current_state.y),
@@ -1093,7 +1113,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             return vr::EVRInputError::WrongType;
         };
 
-        let mut state = action.state(&session_data.session, subaction_path).unwrap();
+        let mut state = state_or_inactive(action, &session_data.session, subaction_path);
 
         let mut active_hand = restrict_to_device;
         if let Some((binding_state, binding_source)) =
