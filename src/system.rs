@@ -502,9 +502,7 @@ impl vr::IVRSystem026_Interface for System {
         }
         0
     }
-    fn AcknowledgeQuit_Exiting(&self) {
-        todo!()
-    }
+    fn AcknowledgeQuit_Exiting(&self) {}
     fn PerformFirmwareUpdate(&self, _: vr::TrackedDeviceIndex_t) -> vr::EVRFirmwareError {
         crate::warn_unimplemented!("PerformFirmwareUpdate");
         vr::EVRFirmwareError::Fail
@@ -516,7 +514,8 @@ impl vr::IVRSystem026_Interface for System {
         false
     }
     fn IsSteamVRDrawingControllers(&self) -> bool {
-        todo!()
+        // xrizer never draws controller models itself.
+        false
     }
     fn IsInputAvailable(&self) -> bool {
         true
@@ -1464,5 +1463,17 @@ mod tests {
         apply(&system, &mut out, &pose, std::ptr::null());
         apply(&system, std::ptr::null_mut(), &pose, &yaw);
         assert_eq!(format!("{out:?}"), before);
+    }
+
+    #[test]
+    fn quit_and_controller_drawing_stubs() {
+        let system = System::new(
+            Arc::new(OpenXrData::new(&Injector::default()).unwrap()),
+            &Injector::default(),
+        );
+        vr::IVRSystem026_Interface::AcknowledgeQuit_Exiting(&system);
+        assert!(!vr::IVRSystem026_Interface::IsSteamVRDrawingControllers(
+            &system
+        ));
     }
 }
