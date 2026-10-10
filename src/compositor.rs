@@ -99,35 +99,61 @@ impl Compositor {
         }
     }
 
-    fn maybe_wait_frame(&self, session_data: &SessionData) {
+    /// Returns false if no new frame was waited for, because the runtime failed to wait or because
+    /// the previous wait is still waiting for its frame to be begun.
+    fn maybe_wait_frame(&self, session_data: &SessionData) -> bool {
         tracy_span!();
         let mut frame_lock = { session_data.comp_data.0.lock().unwrap() };
-        self.frame_state
-            .lock()
-            .unwrap()
-            .advance_to(FrameState::Waited);
+        let previous_state = {
+            let mut frame_state = self.frame_state.lock().unwrap();
+            let previous_state = *frame_state;
+            if previous_state == FrameState::Waited {
+                // The runtime wants the frame we waited for to be begun before it waits for the
+                // next one. This happens when the runtime failed to begin it.
+                debug!("not waiting for frame - the last one has not been begun");
+                return false;
+            }
+            frame_state.advance_to(FrameState::Waited);
+            previous_state
+        };
         let Some(ctrl) = frame_lock.as_mut() else {
             debug!("no frame controller - not starting frame");
-            return;
+            return true;
         };
 
         #[macros::any_graphics(DynFrameController)]
         fn wait_frame<G: GraphicsBackend + 'static>(
             ctrl: &mut FrameController<G>,
-        ) -> (xr::Time, i64) {
+        ) -> xr::Result<(xr::Time, i64)> {
             ctrl.wait_frame()
         }
 
-        let (display_time, display_period) = ctrl.with_any_graphics_mut::<wait_frame>(());
-        self.openxr.display_time.set(display_time);
-        self.openxr
-            .display_period_nanos
-            .store(display_period, Ordering::Relaxed);
+        match ctrl.with_any_graphics_mut::<wait_frame>(()) {
+            Ok((display_time, display_period)) => {
+                self.openxr.display_time.set(display_time);
+                self.openxr
+                    .display_period_nanos
+                    .store(display_period, Ordering::Relaxed);
+                true
+            }
+            Err(err) => {
+                crate::warn_once!("Failed to wait for frame: {}", err);
+                // Nothing was waited for, so there is no frame to begin.
+                *self.frame_state.lock().unwrap() = previous_state;
+                false
+            }
+        }
     }
 
-    fn maybe_begin_frame(&self, session_data: &SessionData) {
+    /// Returns false if the runtime failed to begin the frame.
+    fn maybe_begin_frame(&self, session_data: &SessionData) -> bool {
         tracy_span!();
         let mut frame_lock = { session_data.comp_data.0.lock().unwrap() };
+        if *self.frame_state.lock().unwrap() == FrameState::Submitted {
+            // This happens with explicit timing while the runtime fails to wait for frames.
+            debug!("not starting frame - none has been waited for");
+            return true;
+        }
         if !self
             .frame_state
             .lock()
@@ -135,19 +161,27 @@ impl Compositor {
             .advance_to(FrameState::Begun)
         {
             debug!("not starting frame - already begun or submitted");
-            return;
+            return true;
         };
         let Some(ctrl) = frame_lock.as_mut() else {
             debug!("no frame controller - not starting frame");
-            return;
+            return true;
         };
 
         #[macros::any_graphics(DynFrameController)]
-        fn begin_frame<G: GraphicsBackend + 'static>(ctrl: &mut FrameController<G>) {
+        fn begin_frame<G: GraphicsBackend + 'static>(
+            ctrl: &mut FrameController<G>,
+        ) -> xr::Result<()> {
             ctrl.begin_frame()
         }
 
-        ctrl.with_any_graphics_mut::<begin_frame>(());
+        if let Err(err) = ctrl.with_any_graphics_mut::<begin_frame>(()) {
+            crate::warn_once!("Failed to begin frame: {}", err);
+            // The frame is still waited for. It has to be begun before the next one is waited for.
+            *self.frame_state.lock().unwrap() = FrameState::Waited;
+            return false;
+        }
+        true
     }
 
     pub fn initialize_real_session(
@@ -293,10 +327,13 @@ impl openxr_data::Compositor for Compositor {
         trace!("returning to {old_state:?} frame state");
         match old_state {
             FrameState::Submitted => {}
-            FrameState::Waited => self.maybe_wait_frame(session_data),
-            FrameState::Begun => {
+            FrameState::Waited => {
                 self.maybe_wait_frame(session_data);
-                self.maybe_begin_frame(session_data);
+            }
+            FrameState::Begun => {
+                if self.maybe_wait_frame(session_data) {
+                    self.maybe_begin_frame(session_data);
+                }
             }
         }
     }
@@ -988,10 +1025,20 @@ impl vr::IVRCompositor029_Interface for Compositor {
                 // discard frame
                 self.maybe_begin_frame(&session_data);
             }
-            self.maybe_wait_frame(&session_data);
+            let mut started = self.maybe_wait_frame(&session_data);
 
-            if timing_mode == vr::EVRCompositorTimingMode::Implicit {
-                self.maybe_begin_frame(&session_data);
+            if started && timing_mode == vr::EVRCompositorTimingMode::Implicit {
+                started = self.maybe_begin_frame(&session_data);
+            }
+
+            if !started {
+                // The runtime isn't giving us frames (it may be gone), so there's nothing to pace
+                // the app. Don't let it spin.
+                let period = self.openxr.display_period_nanos.load(Ordering::Relaxed);
+                std::thread::sleep(
+                    std::time::Duration::from_nanos(period.try_into().unwrap_or(0))
+                        .min(std::time::Duration::from_millis(100)),
+                );
             }
         }
         if let Some(system) = self.system.get() {
@@ -1177,9 +1224,10 @@ impl<G: GraphicsBackend> FrameController<G> {
             vr::EVRCompositorError::RequestFailed
         })?;
 
-        let images = swapchain
-            .enumerate_images()
-            .expect("Failed to enumerate swapchain images");
+        let images = swapchain.enumerate_images().map_err(|err| {
+            crate::warn_once!("Failed to enumerate swapchain images: {}", err);
+            vr::EVRCompositorError::RequestFailed
+        })?;
 
         backend.store_swapchain_images(images, create_info.format);
         debug!(
@@ -1258,6 +1306,12 @@ impl<G: GraphicsBackend> FrameController<G> {
         Ok(())
     }
 
+    /// Drops the swapchain, so that the next Submit creates a new one.
+    fn discard_swapchain(&mut self) {
+        self.swapchain_data = None;
+        self.image_acquired = false;
+    }
+
     fn acquire_swapchain_image(&mut self) -> Result<(), vr::EVRCompositorError> {
         let swapchain = &mut self
             .swapchain_data
@@ -1269,9 +1323,7 @@ impl<G: GraphicsBackend> FrameController<G> {
             Ok(index) => index as usize,
             Err(err) => {
                 crate::warn_once!("Failed to acquire swapchain image: {}", err);
-                // Discard the swapchain, so that the next Submit creates a new one.
-                self.swapchain_data = None;
-                self.image_acquired = false;
+                self.discard_swapchain();
                 return Err(vr::EVRCompositorError::RequestFailed);
             }
         };
@@ -1279,36 +1331,42 @@ impl<G: GraphicsBackend> FrameController<G> {
         trace!("waiting image");
         {
             tracy_span!("wait swapchain image");
-            swapchain
-                .wait_image(xr::Duration::INFINITE)
-                .expect("Failed to wait for swapchain image");
+            if let Err(err) = swapchain.wait_image(xr::Duration::INFINITE) {
+                crate::warn_once!("Failed to wait for swapchain image: {}", err);
+                self.discard_swapchain();
+                return Err(vr::EVRCompositorError::RequestFailed);
+            }
         }
 
         self.image_acquired = true;
         Ok(())
     }
 
-    fn wait_frame(&mut self) -> (xr::Time, i64) {
+    fn wait_frame(&mut self) -> xr::Result<(xr::Time, i64)> {
         let frame_state = {
             tracy_span!("wait frame");
-            self.waiter.wait().unwrap()
+            self.waiter.wait()?
         };
         self.should_render = frame_state.should_render && !self.app_suspend_render;
-        (
+        Ok((
             frame_state.predicted_display_time,
             frame_state.predicted_display_period.as_nanos(),
-        )
+        ))
     }
 
-    fn begin_frame(&mut self) {
+    fn begin_frame(&mut self) -> xr::Result<()> {
         if self.image_acquired {
             tracy_span!("release old swapchain image");
-            self.swapchain_data
+            let released = self
+                .swapchain_data
                 .as_mut()
                 .expect("Image is acquired, yet we have no swapchain?")
                 .swapchain
-                .release_image()
-                .unwrap();
+                .release_image();
+            if let Err(err) = released {
+                crate::warn_once!("Failed to release swapchain image: {}", err);
+                self.discard_swapchain();
+            }
         }
 
         if self.swapchain_data.is_some() {
@@ -1316,13 +1374,16 @@ impl<G: GraphicsBackend> FrameController<G> {
             let _ = self.acquire_swapchain_image();
         }
 
-        {
-            tracy_span!("begin frame");
-            self.stream.begin().expect("Couldn't begin frame");
-        }
+        // Reset these first: even if the runtime fails to begin the frame, the app goes on to
+        // submit to the image we acquired.
         self.eyes_submitted = [None; 2];
         self.submitting_null = false;
+        {
+            tracy_span!("begin frame");
+            self.stream.begin()?;
+        }
         trace!("frame begin");
+        Ok(())
     }
 
     fn submit_impl(
@@ -1398,10 +1459,12 @@ impl<G: GraphicsBackend> FrameController<G> {
 
         trace!("submitted {eye:?}");
         if self.eyes_submitted.iter().all(|eye| eye.is_some()) {
-            let mut swapchain_data = self.swapchain_data.as_mut();
-            if let Some(data) = &mut swapchain_data {
+            if let Some(data) = self.swapchain_data.as_mut() {
                 trace!("releasing image");
-                data.swapchain.release_image().unwrap();
+                if let Err(err) = data.swapchain.release_image() {
+                    crate::warn_once!("Failed to release swapchain image: {}", err);
+                    self.discard_swapchain();
+                }
             }
             self.image_acquired = false;
         }
@@ -1424,12 +1487,9 @@ impl<G: GraphicsBackend> FrameController<G> {
         if self.should_render
             && !self.submitting_null
             && self.eyes_submitted.iter().all(|eye| eye.is_some())
+            // The swapchain is gone if the runtime failed to release its image.
+            && let Some(swapchain_data) = self.swapchain_data.as_ref()
         {
-            let swapchain_data = self
-                .swapchain_data
-                .as_ref()
-                .expect("Swapchain data unexpectedly invalid on submit");
-
             let crate::system::ViewData { flags, views } =
                 system.get_views(session_data.current_origin_as_reference_space());
             // The fov has to be valid for the runtime to accept the projection layer.
@@ -1506,9 +1566,13 @@ impl<G: GraphicsBackend> FrameController<G> {
             layers.extend(overlay_layers.iter().map(Deref::deref));
         }
 
-        self.stream
+        if let Err(err) = self
+            .stream
             .end(display_time, xr::EnvironmentBlendMode::OPAQUE, &layers)
-            .unwrap();
+        {
+            crate::warn_once!("Failed to end frame: {}", err);
+            return;
+        }
 
         trace!("frame submitted");
     }
@@ -1566,6 +1630,9 @@ mod tests {
         static SWAPCHAIN_WIDTH: Cell<u32> = const { Cell::new(10) };
         static SWAPCHAIN_HEIGHT: Cell<u32> = const { Cell::new(10) };
         static SWAPCHAIN_FORMAT: Cell<u32> = const { Cell::new(0) };
+        /// What FakeApi::enumerate_swapchain_images fails with, as the fake runtime isn't asked for
+        /// the images.
+        static ENUMERATE_IMAGES_FAILURE: Cell<Option<xr::sys::Result>> = const { Cell::new(Option::None) };
     }
 
     pub enum FakeApi {}
@@ -1601,7 +1668,7 @@ mod tests {
         fn enumerate_swapchain_images(
             _: &openxr::Swapchain<Self>,
         ) -> openxr::Result<Vec<Self::SwapchainImage>> {
-            Ok(Vec::new())
+            ENUMERATE_IMAGES_FAILURE.get().map_or(Ok(Vec::new()), Err)
         }
     }
 
@@ -1915,6 +1982,252 @@ mod tests {
         assert_eq!(f.submit(vr::EVREye::Right), None);
         assert!(has_swapchain(&f));
         assert!(!recreate_failed(&f));
+        SWAPCHAIN_WIDTH.set(10);
+    }
+
+    const SESSION_LOST: xr::sys::Result = xr::sys::Result::ERROR_SESSION_LOST;
+    const RUNTIME_FAILURE: xr::sys::Result = xr::sys::Result::ERROR_RUNTIME_FAILURE;
+
+    /// Makes the runtime fail the calls to `call` until `restore_call`.
+    fn fail_call(call: fakexr::Call, err: xr::sys::Result) {
+        fakexr::set_call_failure(call, Some(err));
+    }
+
+    fn restore_call(call: fakexr::Call) {
+        fakexr::set_call_failure(call, Option::None);
+    }
+
+    fn frame_state(f: &Fixture) -> FrameState {
+        *f.comp.frame_state.lock().unwrap()
+    }
+
+    #[test]
+    fn wait_frame_failure() {
+        let f = Fixture::new();
+        f.ensure_real_session(false);
+
+        // The runtime failing xrWaitFrame must not abort the game (#425). Without a wait there is
+        // no frame to begin, so the frame loop stays put (after ending the frame it had begun)
+        // and tries again with the next WaitGetPoses.
+        fail_call(fakexr::Call::WaitFrame, SESSION_LOST);
+        for _ in 0..2 {
+            assert_eq!(f.wait_get_poses(), None);
+            f.check_frame_state(fakexr::FrameState::Ended);
+            assert_eq!(frame_state(&f), FrameState::Submitted);
+        }
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_eq!(f.submit(vr::EVREye::Right), None);
+        f.comp.PostPresentHandoff();
+        f.check_frame_state(fakexr::FrameState::Ended);
+
+        restore_call(fakexr::Call::WaitFrame);
+        assert_eq!(f.wait_get_poses(), None);
+        f.check_frame_state(fakexr::FrameState::Begun);
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_eq!(f.submit(vr::EVREye::Right), None);
+        f.comp.PostPresentHandoff();
+        f.check_frame_state(fakexr::FrameState::Ended);
+    }
+
+    #[test]
+    fn wait_frame_failure_with_explicit_timing() {
+        let f = Fixture::new();
+        f.comp.SetExplicitTimingMode(
+            vr::EVRCompositorTimingMode::Explicit_ApplicationPerformsPostPresentHandoff,
+        );
+        f.ensure_real_session(true);
+
+        // The app begins and ends its frames itself, but there is no frame to begin or end while
+        // the runtime fails xrWaitFrame.
+        fail_call(fakexr::Call::WaitFrame, SESSION_LOST);
+        for _ in 0..3 {
+            assert_eq!(f.wait_get_poses(), None);
+            assert_eq!(f.comp.SubmitExplicitTimingData(), None);
+            f.submit(vr::EVREye::Left);
+            f.submit(vr::EVREye::Right);
+            f.comp.PostPresentHandoff();
+            f.check_frame_state(fakexr::FrameState::Ended);
+            assert_eq!(frame_state(&f), FrameState::Submitted);
+        }
+
+        restore_call(fakexr::Call::WaitFrame);
+        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(f.comp.SubmitExplicitTimingData(), None);
+        f.check_frame_state(fakexr::FrameState::Begun);
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_eq!(f.submit(vr::EVREye::Right), None);
+        f.comp.PostPresentHandoff();
+        f.check_frame_state(fakexr::FrameState::Ended);
+    }
+
+    #[test]
+    fn begin_frame_failure() {
+        let f = Fixture::new();
+        f.ensure_real_session(false);
+
+        // The frame was waited for but not begun. It has to be begun before the next one is waited
+        // for, and the app can go on submitting meanwhile, but there is nothing to end.
+        fail_call(fakexr::Call::BeginFrame, SESSION_LOST);
+        for _ in 0..2 {
+            assert_eq!(f.wait_get_poses(), None);
+            f.check_frame_state(fakexr::FrameState::Waited);
+            assert_eq!(frame_state(&f), FrameState::Waited);
+            assert_eq!(f.submit(vr::EVREye::Left), None);
+            assert_eq!(f.submit(vr::EVREye::Right), None);
+            f.comp.PostPresentHandoff();
+            f.check_frame_state(fakexr::FrameState::Waited);
+        }
+
+        restore_call(fakexr::Call::BeginFrame);
+        assert_eq!(f.wait_get_poses(), None);
+        f.check_frame_state(fakexr::FrameState::Begun);
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_eq!(f.submit(vr::EVREye::Right), None);
+        f.comp.PostPresentHandoff();
+        f.check_frame_state(fakexr::FrameState::Ended);
+    }
+
+    #[test]
+    fn end_frame_failure() {
+        let f = Fixture::new();
+        f.ensure_real_session(false);
+
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_eq!(f.submit(vr::EVREye::Right), None);
+        fail_call(fakexr::Call::EndFrame, SESSION_LOST);
+        f.comp.PostPresentHandoff();
+        // The frame counts as presented, so that the next WaitGetPoses doesn't end it again.
+        assert_eq!(frame_state(&f), FrameState::Submitted);
+
+        assert_eq!(f.wait_get_poses(), None);
+        f.check_frame_state(fakexr::FrameState::Begun);
+        restore_call(fakexr::Call::EndFrame);
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_eq!(f.submit(vr::EVREye::Right), None);
+        f.comp.PostPresentHandoff();
+        f.check_frame_state(fakexr::FrameState::Ended);
+    }
+
+    #[test]
+    fn session_lost_during_frames() {
+        let f = rendering_fixture();
+        let layers = f.submit_frame(std::ptr::null());
+        assert_eq!(layer_types(&layers), [PROJECTION_LAYER]);
+
+        // The session is lost while the app is rendering (#425): every call fails from here on,
+        // but the app keeps calling.
+        let calls = [
+            fakexr::Call::WaitFrame,
+            fakexr::Call::BeginFrame,
+            fakexr::Call::EndFrame,
+            fakexr::Call::WaitSwapchainImage,
+            fakexr::Call::ReleaseSwapchainImage,
+        ];
+        for call in calls {
+            fail_call(call, SESSION_LOST);
+        }
+        for _ in 0..3 {
+            assert_eq!(f.wait_get_poses(), None);
+            f.comp.SubmitExplicitTimingData();
+            f.submit(vr::EVREye::Left);
+            f.submit(vr::EVREye::Right);
+            f.comp.PostPresentHandoff();
+        }
+
+        // Everything works again once the runtime does.
+        for call in calls {
+            restore_call(call);
+        }
+        for _ in 0..2 {
+            let layers = f.submit_frame(std::ptr::null());
+            assert_eq!(layer_types(&layers), [PROJECTION_LAYER]);
+        }
+    }
+
+    #[test]
+    fn wait_image_failure() {
+        let f = rendering_fixture();
+        let layers = f.submit_frame(std::ptr::null());
+        assert_eq!(layer_types(&layers), [PROJECTION_LAYER]);
+
+        // The image is acquired when the frame begins. If we can't wait for it the swapchain is
+        // discarded, and the Submit creates a new one.
+        fail_call(fakexr::Call::WaitSwapchainImage, RUNTIME_FAILURE);
+        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(f.comp.SubmitExplicitTimingData(), None);
+        assert!(!has_swapchain(&f));
+        restore_call(fakexr::Call::WaitSwapchainImage);
+
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_eq!(f.submit(vr::EVREye::Right), None);
+        assert!(has_swapchain(&f));
+        f.comp.PostPresentHandoff();
+        f.check_frame_state(fakexr::FrameState::Ended);
+        let layers = f.submit_frame(std::ptr::null());
+        assert_eq!(layer_types(&layers), [PROJECTION_LAYER]);
+    }
+
+    #[test]
+    fn release_image_failure_on_submit() {
+        let f = rendering_fixture();
+        let layers = f.submit_frame(std::ptr::null());
+        assert_eq!(layer_types(&layers), [PROJECTION_LAYER]);
+
+        // The swapchain is discarded when the image can't be released, so there is nothing to
+        // build a projection layer from. The next Submit creates a new swapchain.
+        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(f.comp.SubmitExplicitTimingData(), None);
+        fail_call(fakexr::Call::ReleaseSwapchainImage, RUNTIME_FAILURE);
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_eq!(f.submit(vr::EVREye::Right), None);
+        restore_call(fakexr::Call::ReleaseSwapchainImage);
+        assert!(!has_swapchain(&f));
+        f.comp.PostPresentHandoff();
+        f.check_frame_state(fakexr::FrameState::Ended);
+        let session = f.comp.openxr.session_data.get().session.as_raw();
+        assert!(fakexr::session_last_frame_layers(session).is_empty());
+
+        let layers = f.submit_frame(std::ptr::null());
+        assert_eq!(layer_types(&layers), [PROJECTION_LAYER]);
+        assert!(has_swapchain(&f));
+    }
+
+    #[test]
+    fn release_image_failure_on_begin_frame() {
+        let f = rendering_fixture();
+        let layers = f.submit_frame(std::ptr::null());
+        assert_eq!(layer_types(&layers), [PROJECTION_LAYER]);
+
+        // The app doesn't submit, so the image acquired for the frame is released by the next one.
+        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(f.comp.SubmitExplicitTimingData(), None);
+        f.comp.PostPresentHandoff();
+        fail_call(fakexr::Call::ReleaseSwapchainImage, RUNTIME_FAILURE);
+        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(f.comp.SubmitExplicitTimingData(), None);
+        assert!(!has_swapchain(&f));
+        restore_call(fakexr::Call::ReleaseSwapchainImage);
+
+        let layers = f.submit_frame(std::ptr::null());
+        assert_eq!(layer_types(&layers), [PROJECTION_LAYER]);
+    }
+
+    #[test]
+    fn enumerate_images_failure() {
+        let f = Fixture::new();
+        f.ensure_real_session(false);
+
+        SWAPCHAIN_WIDTH.set(40);
+        assert_eq!(f.wait_get_poses(), None);
+        ENUMERATE_IMAGES_FAILURE.set(Some(RUNTIME_FAILURE));
+        assert_eq!(f.submit(vr::EVREye::Left), RequestFailed);
+        assert!(recreate_failed(&f));
+        ENUMERATE_IMAGES_FAILURE.set(Option::None);
+
+        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_eq!(f.submit(vr::EVREye::Right), None);
+        assert!(has_swapchain(&f));
         SWAPCHAIN_WIDTH.set(10);
     }
 
