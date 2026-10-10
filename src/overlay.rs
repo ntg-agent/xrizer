@@ -555,7 +555,7 @@ impl Overlay {
             };
             let tex_swapchain_info =
                 backend.swapchain_info_for_texture(b_texture, texture_bounds, texture.eColorSpace);
-            let mut create_swapchain = || {
+            let mut create_swapchain = || -> Result<_, vr::EVROverlayError> {
                 let mut info = backend.swapchain_info_for_texture(
                     b_texture,
                     texture_bounds,
@@ -563,28 +563,35 @@ impl Overlay {
                 );
                 let initial_format = info.format;
                 session_data.check_format::<G>(&mut info);
-                let swapchain = session_data.create_swapchain(&info).unwrap();
+                let swapchain = session_data.create_swapchain(&info).map_err(|e| {
+                    crate::warn_once!("Failed to create overlay swapchain: {}", e);
+                    vr::EVROverlayError::RequestFailed
+                })?;
                 let images = swapchain
                     .enumerate_images()
                     .expect("Couldn't enumerate swapchain images");
                 backend.store_swapchain_images(images, info.format);
-                SwapchainData {
+                Ok(SwapchainData {
                     swapchain,
                     info,
                     initial_format,
-                }
+                })
             };
             let swapchain = {
-                let data = map
-                    .entry(key)
-                    .unwrap()
-                    .or_insert_with(&mut create_swapchain);
+                use slotmap::secondary::Entry;
+                let data = match map.entry(key).unwrap() {
+                    Entry::Occupied(entry) => entry.into_mut(),
+                    Entry::Vacant(entry) => entry.insert(create_swapchain()?),
+                };
                 if !is_usable_swapchain(&data.info, data.initial_format, &tex_swapchain_info) {
-                    *data = create_swapchain();
+                    *data = create_swapchain()?;
                 }
                 &mut data.swapchain
             };
-            let idx = swapchain.acquire_image().unwrap();
+            let idx = swapchain.acquire_image().map_err(|e| {
+                crate::warn_once!("Failed to acquire overlay swapchain image: {}", e);
+                vr::EVROverlayError::RequestFailed
+            })?;
             swapchain.wait_image(xr::Duration::INFINITE).unwrap();
 
             let extent = backend.copy_overlay_to_swapchain(b_texture, texture_bounds, idx as usize);
@@ -594,13 +601,22 @@ impl Overlay {
         }
 
         let backend = self.compositor.as_mut().unwrap();
-        let extent = backend.with_any_graphics_mut::<set_swapchain_texture>((
-            &session_data,
-            self.bounds,
-            swapchains,
-            key,
-            texture,
-        ))?;
+        let extent = backend
+            .with_any_graphics_mut::<set_swapchain_texture>((
+                &session_data,
+                self.bounds,
+                swapchains,
+                key,
+                texture,
+            ))
+            .inspect_err(|e| {
+                // The swapchain may have been recreated, or created after a session restart that
+                // kept the rect, and never had an image released to it. Drop the rect so that
+                // get_layers does not submit a layer for it.
+                if *e == vr::EVROverlayError::RequestFailed {
+                    self.rect = None;
+                }
+            })?;
         self.rect = Some(xr::Rect2Di {
             extent,
             offset: xr::Offset2Di::default(),
