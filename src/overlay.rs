@@ -632,6 +632,24 @@ macro_rules! get_overlay {
     };
 }
 
+/// Copies `s` into `buf` if it fits, and reports the size needed to hold it (with the nul).
+fn write_overlay_cstr(s: &CStr, buf: *mut c_char, size: u32, err: *mut vr::EVROverlayError) -> u32 {
+    let bytes = s.to_bytes_with_nul();
+    let need = bytes.len() as u32;
+    let res = if buf.is_null() {
+        vr::EVROverlayError::None
+    } else if size >= need {
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr().cast(), buf, bytes.len()) };
+        vr::EVROverlayError::None
+    } else {
+        vr::EVROverlayError::ArrayTooSmall
+    };
+    if let Some(e) = unsafe { err.as_mut() } {
+        *e = res;
+    }
+    need
+}
+
 impl vr::IVROverlay028_Interface for OverlayMan {
     fn CreateOverlay(
         &self,
@@ -1230,24 +1248,37 @@ impl vr::IVROverlay028_Interface for OverlayMan {
     }
     fn GetOverlayTextureColorSpace(
         &self,
-        _: vr::VROverlayHandle_t,
-        _: *mut vr::EColorSpace,
+        handle: vr::VROverlayHandle_t,
+        color_space: *mut vr::EColorSpace,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayTextureColorSpace");
+        get_overlay!(self, handle, _overlay);
+        if color_space.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
+        unsafe { color_space.write(vr::EColorSpace::Auto) };
+        vr::EVROverlayError::None
     }
     fn SetOverlayTextureColorSpace(
         &self,
         _: vr::VROverlayHandle_t,
         _: vr::EColorSpace,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("SetOverlayTextureColorSpace");
+        vr::EVROverlayError::None
     }
     fn GetOverlayPreCurvePitch(
         &self,
-        _: vr::VROverlayHandle_t,
-        _: *mut f32,
+        handle: vr::VROverlayHandle_t,
+        pitch: *mut f32,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayPreCurvePitch");
+        get_overlay!(self, handle, _overlay);
+        if pitch.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
+        unsafe { pitch.write(0.0) };
+        vr::EVROverlayError::None
     }
     fn SetOverlayPreCurvePitch(&self, _: vr::VROverlayHandle_t, _: f32) -> vr::EVROverlayError {
         todo!()
@@ -1317,8 +1348,18 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         overlay.z_order = value as _;
         vr::EVROverlayError::None
     }
-    fn GetOverlayTexelAspect(&self, _: vr::VROverlayHandle_t, _: *mut f32) -> vr::EVROverlayError {
-        todo!()
+    fn GetOverlayTexelAspect(
+        &self,
+        handle: vr::VROverlayHandle_t,
+        aspect: *mut f32,
+    ) -> vr::EVROverlayError {
+        crate::warn_unimplemented!("GetOverlayTexelAspect");
+        get_overlay!(self, handle, _overlay);
+        if aspect.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
+        unsafe { aspect.write(1.0) };
+        vr::EVROverlayError::None
     }
     fn SetOverlayTexelAspect(&self, _: vr::VROverlayHandle_t, _: f32) -> vr::EVROverlayError {
         crate::warn_unimplemented!("SetOverlayTexelAspect");
@@ -1336,12 +1377,22 @@ impl vr::IVROverlay028_Interface for OverlayMan {
 
     fn GetOverlayColor(
         &self,
-        _: vr::VROverlayHandle_t,
-        _: *mut f32,
-        _: *mut f32,
-        _: *mut f32,
+        handle: vr::VROverlayHandle_t,
+        red: *mut f32,
+        green: *mut f32,
+        blue: *mut f32,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayColor");
+        get_overlay!(self, handle, _overlay);
+        if red.is_null() || green.is_null() || blue.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
+        unsafe {
+            red.write(1.0);
+            green.write(1.0);
+            blue.write(1.0);
+        }
+        vr::EVROverlayError::None
     }
     fn SetOverlayColor(
         &self,
@@ -1353,16 +1404,32 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         crate::warn_unimplemented!("SetOverlayColor");
         vr::EVROverlayError::None
     }
-    fn GetOverlayFlags(&self, _: vr::VROverlayHandle_t, _: *mut u32) -> vr::EVROverlayError {
-        todo!()
+    fn GetOverlayFlags(
+        &self,
+        handle: vr::VROverlayHandle_t,
+        flags: *mut u32,
+    ) -> vr::EVROverlayError {
+        crate::warn_unimplemented!("GetOverlayFlags");
+        get_overlay!(self, handle, _overlay);
+        if flags.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
+        unsafe { flags.write(0) };
+        vr::EVROverlayError::None
     }
     fn GetOverlayFlag(
         &self,
-        _: vr::VROverlayHandle_t,
+        handle: vr::VROverlayHandle_t,
         _: vr::VROverlayFlags,
-        _: *mut bool,
+        enabled: *mut bool,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayFlag");
+        get_overlay!(self, handle, _overlay);
+        if enabled.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
+        unsafe { enabled.write(false) };
+        vr::EVROverlayError::None
     }
     fn SetOverlayFlag(
         &self,
@@ -1373,11 +1440,17 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         crate::warn_unimplemented!("SetOverlayFlag");
         vr::EVROverlayError::None
     }
-    fn GetOverlayRenderingPid(&self, _: vr::VROverlayHandle_t) -> u32 {
-        todo!()
+    fn GetOverlayRenderingPid(&self, handle: vr::VROverlayHandle_t) -> u32 {
+        let overlays = self.overlays.read().unwrap();
+        if overlays.contains_key(OverlayKey::from(KeyData::from_ffi(handle))) {
+            std::process::id()
+        } else {
+            0
+        }
     }
     fn SetOverlayRenderingPid(&self, _: vr::VROverlayHandle_t, _: u32) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("SetOverlayRenderingPid");
+        vr::EVROverlayError::None
     }
     /// Return the name of the given error enum as a pointer to a static c string.
     fn GetOverlayErrorNameFromEnum(&self, e: vr::EVROverlayError) -> *const c_char {
@@ -1412,34 +1485,50 @@ impl vr::IVROverlay028_Interface for OverlayMan {
     }
     fn GetOverlayImageData(
         &self,
-        _: vr::VROverlayHandle_t,
+        handle: vr::VROverlayHandle_t,
         _: *mut c_void,
         _: u32,
         _: *mut u32,
         _: *mut u32,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayImageData");
+        get_overlay!(self, handle, _overlay);
+        vr::EVROverlayError::RequestFailed
     }
     fn SetOverlayName(&self, _: vr::VROverlayHandle_t, _: *const c_char) -> vr::EVROverlayError {
         todo!()
     }
     fn GetOverlayName(
         &self,
-        _: vr::VROverlayHandle_t,
-        _: *mut c_char,
-        _: u32,
-        _: *mut vr::EVROverlayError,
+        handle: vr::VROverlayHandle_t,
+        buf: *mut c_char,
+        size: u32,
+        err: *mut vr::EVROverlayError,
     ) -> u32 {
-        todo!()
+        let overlays = self.overlays.read().unwrap();
+        let Some(overlay) = overlays.get(OverlayKey::from(KeyData::from_ffi(handle))) else {
+            if let Some(e) = unsafe { err.as_mut() } {
+                *e = vr::EVROverlayError::UnknownOverlay;
+            }
+            return 0;
+        };
+        write_overlay_cstr(&overlay.name, buf, size, err)
     }
     fn GetOverlayKey(
         &self,
-        _: vr::VROverlayHandle_t,
-        _: *mut c_char,
-        _: u32,
-        _: *mut vr::EVROverlayError,
+        handle: vr::VROverlayHandle_t,
+        buf: *mut c_char,
+        size: u32,
+        err: *mut vr::EVROverlayError,
     ) -> u32 {
-        todo!()
+        let overlays = self.overlays.read().unwrap();
+        let Some(overlay) = overlays.get(OverlayKey::from(KeyData::from_ffi(handle))) else {
+            if let Some(e) = unsafe { err.as_mut() } {
+                *e = vr::EVROverlayError::UnknownOverlay;
+            }
+            return 0;
+        };
+        write_overlay_cstr(&overlay.key, buf, size, err)
     }
     fn DestroyOverlay(&self, handle: vr::VROverlayHandle_t) -> vr::EVROverlayError {
         let key = OverlayKey::from(KeyData::from_ffi(handle));
@@ -1763,5 +1852,92 @@ mod tests {
         assert_eq!(o.SetOverlayCursor(h, cursor), E::None);
         assert_eq!(o.TriggerLaserMouseHapticVibration(h, 0., 0., 0.), E::None);
         assert!(!o.IsHoverTargetOverlay(h));
+    }
+
+    // Overlay properties: color space, pitch, aspect, color, flags, pids, image data, name and key.
+
+    #[test]
+    fn overlay_property_getters() {
+        let o = overlay_man();
+        let h = create(&o, c"key");
+        let (linear, auto) = (vr::EColorSpace::Linear, vr::EColorSpace::Auto);
+        check_getter(h, linear, auto, |h, p| o.GetOverlayTextureColorSpace(h, p));
+        check_getter(h, 7.0, 0.0, |h, p| o.GetOverlayPreCurvePitch(h, p));
+        check_getter(h, 7.0, 1.0, |h, p| o.GetOverlayTexelAspect(h, p));
+        check_getter(h, 7, 0, |h, p| o.GetOverlayFlags(h, p));
+        let flag = vr::VROverlayFlags::NoDashboardTab;
+        check_getter(h, true, false, |h, p| o.GetOverlayFlag(h, flag, p));
+        assert_eq!(o.SetOverlayTextureColorSpace(h, linear), E::None);
+        assert_eq!(o.SetOverlayRenderingPid(h, 1234), E::None);
+    }
+
+    #[test]
+    fn overlay_color_pid_and_image_data() {
+        let o = overlay_man();
+        let h = create(&o, c"key");
+        let invalid = vr::k_ulOverlayHandleInvalid;
+        let (mut r, mut g, mut b) = (0.5, 0.5, 0.5);
+        assert_eq!(o.GetOverlayColor(h, &mut r, &mut g, &mut b), E::None);
+        assert_eq!((r, g, b), (1.0, 1.0, 1.0));
+        let null = std::ptr::null_mut();
+        assert_eq!(
+            o.GetOverlayColor(h, &mut r, null, &mut b),
+            E::InvalidParameter
+        );
+        assert_eq!(
+            o.GetOverlayColor(invalid, &mut r, &mut g, &mut b),
+            E::UnknownOverlay
+        );
+
+        assert_eq!(o.GetOverlayRenderingPid(h), std::process::id());
+        assert_eq!(o.GetOverlayRenderingPid(invalid), 0);
+
+        let (mut pixels, mut w, mut ht) = ([7u8; 4], 5, 5);
+        let data = pixels.as_mut_ptr().cast();
+        let err = o.GetOverlayImageData(h, data, 4, &mut w, &mut ht);
+        assert_eq!((err, pixels, w, ht), (E::RequestFailed, [7; 4], 5, 5));
+        let err = o.GetOverlayImageData(invalid, data, 4, &mut w, &mut ht);
+        assert_eq!(err, E::UnknownOverlay);
+    }
+
+    #[track_caller]
+    fn check_cstr_getter(
+        h: vr::VROverlayHandle_t,
+        want: &CStr,
+        get: impl Fn(vr::VROverlayHandle_t, *mut c_char, u32, *mut E) -> u32,
+    ) {
+        let need = want.to_bytes_with_nul().len() as u32;
+        let (mut buf, mut err) = ([1 as c_char; 64], E::UnknownOverlay);
+        assert_eq!(get(h, buf.as_mut_ptr(), 64, &mut err), need);
+        assert_eq!(
+            (err, unsafe { CStr::from_ptr(buf.as_ptr()) }),
+            (E::None, want)
+        );
+
+        err = E::UnknownOverlay;
+        assert_eq!(get(h, std::ptr::null_mut(), 0, &mut err), need);
+        assert_eq!(err, E::None);
+
+        buf = [1; 64];
+        assert_eq!(get(h, buf.as_mut_ptr(), need - 1, &mut err), need);
+        assert_eq!((err, buf), (E::ArrayTooSmall, [1; 64]));
+
+        let invalid = vr::k_ulOverlayHandleInvalid;
+        assert_eq!(get(invalid, buf.as_mut_ptr(), 64, &mut err), 0);
+        assert_eq!((err, buf), (E::UnknownOverlay, [1; 64]));
+        assert_eq!(get(invalid, buf.as_mut_ptr(), 64, std::ptr::null_mut()), 0);
+    }
+
+    #[test]
+    fn overlay_name_and_key() {
+        let o = overlay_man();
+        let mut h = vr::k_ulOverlayHandleInvalid;
+        let (key, name) = (c"some.key", c"Some Name");
+        assert_eq!(
+            o.CreateOverlay(key.as_ptr(), name.as_ptr(), &mut h),
+            E::None
+        );
+        check_cstr_getter(h, name, |h, b, s, e| o.GetOverlayName(h, b, s, e));
+        check_cstr_getter(h, key, |h, b, s, e| o.GetOverlayKey(h, b, s, e));
     }
 }
