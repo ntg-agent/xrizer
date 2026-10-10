@@ -1197,7 +1197,10 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
 
         {
             tracy_span!("xrSyncActions");
-            data.session.sync_actions(&sync_sets).unwrap();
+            if let Err(err) = data.session.sync_actions(&sync_sets) {
+                crate::warn_once!("Failed to sync actions: {}", err);
+                return vr::EVRInputError::IPCError;
+            }
         }
 
         if let Some(present) = self.openxr.user_presence() {
@@ -1622,21 +1625,25 @@ impl<C: openxr_data::Compositor> Input<C> {
                 && (right_hand.is_none_or(|hand| !hand.connected))
             {
                 debug!("no controllers connected - syncing info set");
-                data.session
+                if let Err(err) = data
+                    .session
                     .sync_actions(&[xr::ActiveActionSet::new(&loaded.info_set)])
-                    .unwrap();
+                {
+                    crate::warn_once!("Failed to sync the info action set: {}", err);
+                }
             }
             return;
         }
 
         match input_data.get_legacy_actions() {
             Some(actions) => {
-                data.session
-                    .sync_actions(&[
-                        xr::ActiveActionSet::new(&actions.set),
-                        xr::ActiveActionSet::new(&input_data.pose_data.get().unwrap().set),
-                    ])
-                    .unwrap();
+                if let Err(err) = data.session.sync_actions(&[
+                    xr::ActiveActionSet::new(&actions.set),
+                    xr::ActiveActionSet::new(&input_data.pose_data.get().unwrap().set),
+                ]) {
+                    crate::warn_once!("Failed to sync the legacy actions: {}", err);
+                    return;
+                }
 
                 self.legacy_state.on_action_sync();
             }

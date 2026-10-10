@@ -2115,3 +2115,43 @@ fn skeletal_null_out_pointers() {
     );
     assert_eq!(level, vr::EVRSkeletalTrackingLevel::Partial);
 }
+
+const SESSION_LOST: xr::sys::Result = xr::sys::Result::ERROR_SESSION_LOST;
+
+fn fail_call(call: fakexr::Call, err: xr::sys::Result) {
+    fakexr::set_call_failure(call, Some(err));
+}
+
+fn restore_call(call: fakexr::Call) {
+    fakexr::set_call_failure(call, None);
+}
+
+#[test]
+fn update_action_state_runtime_failure() {
+    let mut f = Fixture::new();
+    let set1 = f.get_action_set_handle(c"/actions/set1");
+    f.load_actions(c"actions.json");
+
+    // The runtime failing xrSyncActions must not abort the game (#425).
+    fail_call(fakexr::Call::SyncActions, SESSION_LOST);
+    let mut active = vr::VRActiveActionSet_t {
+        ulActionSet: set1,
+        ..Default::default()
+    };
+    assert_eq!(
+        f.input.UpdateActionState(
+            &mut active,
+            std::mem::size_of::<vr::VRActiveActionSet_t>() as u32,
+            1
+        ),
+        vr::EVRInputError::IPCError
+    );
+    // The frame start syncs the actions if no controllers are connected.
+    f.input.frame_start_update();
+
+    restore_call(fakexr::Call::SyncActions);
+    f.sync(vr::VRActiveActionSet_t {
+        ulActionSet: set1,
+        ..Default::default()
+    });
+}

@@ -93,12 +93,13 @@ impl<C: openxr_data::Compositor> Input<C> {
         session
             .attach_action_sets(&[&legacy.set, pose_set])
             .unwrap();
-        session
-            .sync_actions(&[
-                xr::ActiveActionSet::new(&legacy.set),
-                xr::ActiveActionSet::new(pose_set),
-            ])
-            .unwrap();
+        // The actions are attached, so if this fails they are just synced with the next frame.
+        if let Err(err) = session.sync_actions(&[
+            xr::ActiveActionSet::new(&legacy.set),
+            xr::ActiveActionSet::new(pose_set),
+        ]) {
+            crate::warn_once!("Failed to sync the legacy actions: {}", err);
+        }
 
         input_data
             .actions
@@ -433,6 +434,7 @@ mod tests {
     use crate::openxr_data::Hand;
     use openvr as vr;
     use openxr as xr;
+    use std::sync::atomic::Ordering;
 
     #[repr(C)]
     #[derive(Default)]
@@ -813,6 +815,43 @@ mod tests {
 
         let state = unsafe { state.assume_init() };
         assert_eq!({ state.ulButtonPressed }, 0);
+    }
+
+    #[test]
+    fn sync_actions_runtime_failure() {
+        let mut f = Fixture::new();
+        f.input.openxr.restart_session();
+        f.set_interaction_profile::<SimpleController>(fakexr::UserPath::LeftHand);
+        f.set_interaction_profile::<SimpleController>(fakexr::UserPath::RightHand);
+        f.input.openxr.poll_events();
+
+        // The runtime failing xrSyncActions must not abort the game (#425). That includes the first
+        // sync, when the legacy actions are set up.
+        let packet_num = || f.input.legacy_state.packet_num.load(Ordering::Relaxed);
+        fakexr::set_call_failure(
+            fakexr::Call::SyncActions,
+            Some(xr::sys::Result::ERROR_SESSION_LOST),
+        );
+        f.input.frame_start_update();
+        assert!(
+            f.input
+                .openxr
+                .session_data
+                .get()
+                .input_data
+                .get_legacy_actions()
+                .is_some()
+        );
+
+        // The failed syncs don't count as new states of the controllers.
+        let packet = packet_num();
+        f.input.frame_start_update();
+        f.input.frame_start_update();
+        assert_eq!(packet_num(), packet);
+
+        fakexr::set_call_failure(fakexr::Call::SyncActions, None);
+        f.input.frame_start_update();
+        assert_eq!(packet_num(), packet + 1);
     }
 
     #[test]
