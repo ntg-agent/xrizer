@@ -1877,6 +1877,81 @@ mod tests {
     }
 
     #[test]
+    fn overlay_swapchain_failure() {
+        use crate::overlay::OverlayMan;
+        use vr::IVROverlay027_Interface;
+
+        let f = Fixture::new();
+        let overlays = Arc::new(OverlayMan::new(f.comp.openxr.clone(), &Injector::default()));
+        f.comp.overlays.set(Arc::downgrade(&overlays));
+        overlays.compositor.set(Arc::downgrade(&f.comp));
+
+        let mut overlay = 0;
+        assert_eq!(
+            overlays.CreateOverlay(
+                c"test_overlay".as_ptr(),
+                c"TestOverlay".as_ptr(),
+                &mut overlay
+            ),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(overlays.ShowOverlay(overlay), vr::EVROverlayError::None);
+
+        // Set up the real session first so that the failures below hit the overlay swapchain
+        // and not the one of the compositor.
+        f.ensure_real_session(false);
+
+        // The runtime failing to create a swapchain or to acquire an image must not panic.
+        // The overlay has no texture then, but a frame can still be submitted.
+        let failures: [fn(xr::sys::Result); 2] = [
+            fakexr::fail_next_swapchain_create,
+            fakexr::fail_next_swapchain_acquire,
+        ];
+        for fail_next in failures {
+            fail_next(xr::sys::Result::ERROR_RUNTIME_FAILURE);
+            assert_eq!(
+                overlays.SetOverlayTexture(overlay, &FakeGraphicsData::texture(&f.vk)),
+                vr::EVROverlayError::RequestFailed
+            );
+            f.check_frame_state(fakexr::FrameState::Begun);
+            f.comp.PostPresentHandoff();
+            f.check_frame_state(fakexr::FrameState::Ended);
+            assert_eq!(f.wait_get_poses(), None);
+        }
+
+        // The failures were one-off: setting the texture works again.
+        assert_eq!(
+            overlays.SetOverlayTexture(overlay, &FakeGraphicsData::texture(&f.vk)),
+            vr::EVROverlayError::None
+        );
+        f.check_frame_state(fakexr::FrameState::Begun);
+        f.comp.PostPresentHandoff();
+        f.check_frame_state(fakexr::FrameState::Ended);
+
+        // A failure after the overlay got a texture must not leave a layer behind that uses a
+        // swapchain without a released image: a bigger texture recreates the swapchain.
+        assert_eq!(f.wait_get_poses(), None);
+        let layer_count = || {
+            let session = f.comp.openxr.session_data.get();
+            overlays.get_layers::<FakeApi>(&session, false).len()
+        };
+        assert_eq!(layer_count(), 1);
+        SWAPCHAIN_WIDTH.set(40);
+        fakexr::fail_next_swapchain_acquire(xr::sys::Result::ERROR_RUNTIME_FAILURE);
+        assert_eq!(
+            overlays.SetOverlayTexture(overlay, &FakeGraphicsData::texture(&f.vk)),
+            vr::EVROverlayError::RequestFailed
+        );
+        assert_eq!(layer_count(), 0);
+        assert_eq!(
+            overlays.SetOverlayTexture(overlay, &FakeGraphicsData::texture(&f.vk)),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(layer_count(), 1);
+        SWAPCHAIN_WIDTH.set(10);
+    }
+
+    #[test]
     fn error_on_multiple_same_eye_submit() {
         let f = Fixture::new();
 
