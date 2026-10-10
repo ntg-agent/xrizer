@@ -343,14 +343,23 @@ macro_rules! get_subaction_path {
     };
 }
 
+/// Writes an empty string to `buf`, if there is room for it.
+fn write_empty_string(buf: *mut c_char, size: u32) {
+    if !buf.is_null() && size > 0 {
+        unsafe { buf.write(0) };
+    }
+}
+
 impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
     fn GetBindingVariant(
         &self,
         _: vr::VRInputValueHandle_t,
-        _: *mut c_char,
-        _: u32,
+        variant: *mut c_char,
+        variant_size: u32,
     ) -> vr::EVRInputError {
         crate::warn_unimplemented!("GetBindingVariant");
+        // Bindings without a variant are reported as an empty string.
+        write_empty_string(variant, variant_size);
         vr::EVRInputError::None
     }
     fn OpenBindingUI(
@@ -454,21 +463,28 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
     fn GetOriginLocalizedName(
         &self,
         _: vr::VRInputValueHandle_t,
-        _: *mut c_char,
-        _: u32,
+        name_array: *mut c_char,
+        name_array_size: u32,
         _: i32,
     ) -> vr::EVRInputError {
         crate::warn_unimplemented!("GetOriginLocalizedName");
+        write_empty_string(name_array, name_array_size);
         vr::EVRInputError::None
     }
     fn GetActionOrigins(
         &self,
         _: vr::VRActionSetHandle_t,
         _: vr::VRActionHandle_t,
-        _: *mut vr::VRInputValueHandle_t,
-        _: u32,
+        origins_out: *mut vr::VRInputValueHandle_t,
+        origins_out_count: u32,
     ) -> vr::EVRInputError {
         crate::warn_unimplemented!("GetActionOrigins");
+        // No origins are reported: the whole array is filled with invalid handles.
+        if !origins_out.is_null() {
+            let origins =
+                unsafe { std::slice::from_raw_parts_mut(origins_out, origins_out_count as usize) };
+            origins.fill(vr::k_ulInvalidInputValueHandle);
+        }
         vr::EVRInputError::None
     }
     fn TriggerHapticVibrationAction(

@@ -1132,3 +1132,45 @@ fn dominant_hand_defaults_to_right() {
         vr::EVRInputError::InvalidParam
     );
 }
+
+#[test]
+fn unimplemented_getters_write_neutral_outputs() {
+    use std::ffi::c_char;
+    use vr::IVRInput011_Interface as I;
+
+    let f = Fixture::new();
+    let input = &*f.input;
+    let hand = f.get_input_source_handle(c"/user/hand/left");
+    let ok = vr::EVRInputError::None;
+
+    // Strings: "" in a non-null buffer of size > 0; size 0 and null buffers are left alone.
+    type StringGetter<'a> = &'a dyn Fn(*mut c_char, u32) -> vr::EVRInputError;
+    let string_getters: [StringGetter; 2] = [
+        &|buf, size| I::GetBindingVariant(input, hand, buf, size),
+        &|buf, size| I::GetOriginLocalizedName(input, hand, buf, size, 0),
+    ];
+    for get in string_getters {
+        let mut buf = [0x7f as c_char; 4];
+        assert_eq!(get(buf.as_mut_ptr(), 4), ok);
+        assert_eq!(buf, [0, 0x7f, 0x7f, 0x7f]);
+        buf = [0x7f; 4];
+        assert_eq!(get(buf.as_mut_ptr(), 0), ok);
+        assert_eq!(buf, [0x7f; 4]);
+        assert_eq!(get(std::ptr::null_mut(), 4), ok);
+    }
+
+    // Origins: every provided entry is overwritten with the invalid handle, nothing past it is.
+    let mut origins = [0xdead_beef; 4];
+    let err = I::GetActionOrigins(input, 0, 0, origins.as_mut_ptr(), 3);
+    assert_eq!(err, ok);
+    let invalid = vr::k_ulInvalidInputValueHandle;
+    assert_eq!(origins, [invalid, invalid, invalid, 0xdead_beef]);
+    assert_eq!(
+        I::GetActionOrigins(input, 0, 0, std::ptr::null_mut(), 3),
+        ok
+    );
+    assert_eq!(
+        I::GetActionOrigins(input, 0, 0, origins.as_mut_ptr(), 0),
+        ok
+    );
+}
