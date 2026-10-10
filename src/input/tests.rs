@@ -1132,3 +1132,485 @@ fn dominant_hand_defaults_to_right() {
         vr::EVRInputError::InvalidParam
     );
 }
+
+#[test]
+fn show_action_origins_is_a_noop() {
+    // Vinyl Reality calls this when selecting a menu item (#331); it used to panic.
+    let f = Fixture::new();
+    f.load_actions(c"actions.json");
+    let set = f.get_action_set_handle(c"/actions/set1");
+    let action = f.get_action_handle(c"/actions/set1/in/boolact");
+
+    assert_eq!(
+        vr::IVRInput011_Interface::ShowActionOrigins(&*f.input, set, action),
+        vr::EVRInputError::None
+    );
+    assert_eq!(
+        vr::IVRInput011_Interface::ShowActionOrigins(&*f.input, 0, 0),
+        vr::EVRInputError::None
+    );
+}
+
+#[test]
+fn show_bindings_for_action_set_is_a_noop() {
+    let f = Fixture::new();
+    f.load_actions(c"actions.json");
+    let set = f.get_action_set_handle(c"/actions/set1");
+    let mut active = vr::VRActiveActionSet_t {
+        ulActionSet: set,
+        ..Default::default()
+    };
+
+    assert_eq!(
+        vr::IVRInput011_Interface::ShowBindingsForActionSet(
+            &*f.input,
+            &mut active,
+            std::mem::size_of::<vr::VRActiveActionSet_t>() as u32,
+            1,
+            0
+        ),
+        vr::EVRInputError::None
+    );
+    assert_eq!(
+        vr::IVRInput011_Interface::ShowBindingsForActionSet(
+            &*f.input,
+            std::ptr::null_mut(),
+            0,
+            0,
+            0
+        ),
+        vr::EVRInputError::None
+    );
+}
+
+#[test]
+fn component_state_for_binding_has_no_data() {
+    let f = Fixture::new();
+    let binding = vr::InputBindingInfo_t::default();
+    let mut state = vr::RenderModel_ComponentState_t {
+        uProperties: 0x55,
+        ..Default::default()
+    };
+
+    assert_eq!(
+        vr::IVRInput011_Interface::GetComponentStateForBinding(
+            &*f.input,
+            c"renderModel".as_ptr(),
+            c"component".as_ptr(),
+            &binding,
+            std::mem::size_of::<vr::InputBindingInfo_t>() as u32,
+            1,
+            &mut state
+        ),
+        vr::EVRInputError::NoData
+    );
+    // The output must not be fabricated.
+    assert_eq!(state.uProperties, 0x55);
+    assert_eq!(state.mTrackingToComponentLocal.m, [[0.0; 4]; 3]);
+
+    // null arguments are not dereferenced
+    assert_eq!(
+        vr::IVRInput011_Interface::GetComponentStateForBinding(
+            &*f.input,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+            0,
+            std::ptr::null_mut()
+        ),
+        vr::EVRInputError::NoData
+    );
+}
+
+// Parent of each bone in SteamVR's reference hand skeleton
+// (SteamVR/resources/skeletons/vr_glove_{left,right}_skeleton.glb).
+const STEAMVR_BONE_PARENTS: [i32; 31] = [
+    -1, 0, 1, 2, 3, 4, 1, 6, 7, 8, 9, 1, 11, 12, 13, 14, 1, 16, 17, 18, 19, 1, 21, 22, 23, 24, 0,
+    0, 0, 0, 0,
+];
+
+const STEAMVR_BONE_NAMES_LEFT: [&str; 31] = [
+    "Root",
+    "wrist_l",
+    "finger_thumb_0_l",
+    "finger_thumb_1_l",
+    "finger_thumb_2_l",
+    "finger_thumb_l_end",
+    "finger_index_meta_l",
+    "finger_index_0_l",
+    "finger_index_1_l",
+    "finger_index_2_l",
+    "finger_index_l_end",
+    "finger_middle_meta_l",
+    "finger_middle_0_l",
+    "finger_middle_1_l",
+    "finger_middle_2_l",
+    "finger_middle_l_end",
+    "finger_ring_meta_l",
+    "finger_ring_0_l",
+    "finger_ring_1_l",
+    "finger_ring_2_l",
+    "finger_ring_l_end",
+    "finger_pinky_meta_l",
+    "finger_pinky_0_l",
+    "finger_pinky_1_l",
+    "finger_pinky_2_l",
+    "finger_pinky_l_end",
+    "finger_thumb_l_aux",
+    "finger_index_l_aux",
+    "finger_middle_l_aux",
+    "finger_ring_l_aux",
+    "finger_pinky_l_aux",
+];
+
+const STEAMVR_BONE_NAMES_RIGHT: [&str; 31] = [
+    "Root",
+    "wrist_r",
+    "finger_thumb_0_r",
+    "finger_thumb_1_r",
+    "finger_thumb_2_r",
+    "finger_thumb_r_end",
+    "finger_index_meta_r",
+    "finger_index_0_r",
+    "finger_index_1_r",
+    "finger_index_2_r",
+    "finger_index_r_end",
+    "finger_middle_meta_r",
+    "finger_middle_0_r",
+    "finger_middle_1_r",
+    "finger_middle_2_r",
+    "finger_middle_r_end",
+    "finger_ring_meta_r",
+    "finger_ring_0_r",
+    "finger_ring_1_r",
+    "finger_ring_2_r",
+    "finger_ring_r_end",
+    "finger_pinky_meta_r",
+    "finger_pinky_0_r",
+    "finger_pinky_1_r",
+    "finger_pinky_2_r",
+    "finger_pinky_r_end",
+    "finger_thumb_r_aux",
+    "finger_index_r_aux",
+    "finger_middle_r_aux",
+    "finger_ring_r_aux",
+    "finger_pinky_r_aux",
+];
+
+#[test]
+fn bone_hierarchy() {
+    let f = Fixture::new();
+    f.load_actions(c"actions.json");
+
+    for name in [c"/actions/set1/in/SkellyL", c"/actions/set1/in/SkellyR"] {
+        let skeleton = f.get_action_handle(name);
+
+        let mut count = 0;
+        assert_eq!(
+            vr::IVRInput011_Interface::GetBoneCount(&*f.input, skeleton, &mut count),
+            vr::EVRInputError::None
+        );
+        assert_eq!(count as usize, STEAMVR_BONE_PARENTS.len());
+
+        let mut parents = [i32::MIN; 31];
+        assert_eq!(
+            vr::IVRInput011_Interface::GetBoneHierarchy(
+                &*f.input,
+                skeleton,
+                parents.as_mut_ptr(),
+                parents.len() as u32
+            ),
+            vr::EVRInputError::None
+        );
+        assert_eq!(parents, STEAMVR_BONE_PARENTS);
+
+        // Every bone, except the root and the aux bones, is a child of an earlier bone.
+        for (bone, parent) in parents.iter().enumerate() {
+            assert!(*parent < bone as i32, "bone {bone} parent {parent}");
+        }
+    }
+}
+
+#[test]
+fn bone_hierarchy_bad_params() {
+    let f = Fixture::new();
+    f.load_actions(c"actions.json");
+    let skeleton = f.get_action_handle(c"/actions/set1/in/SkellyR");
+    let boolact = f.get_action_handle(c"/actions/set1/in/boolact");
+
+    let mut parents = [i32::MIN; 31];
+    let get = |action, ptr, count| {
+        vr::IVRInput011_Interface::GetBoneHierarchy(&*f.input, action, ptr, count)
+    };
+
+    // too few entries: nothing is written
+    assert_eq!(
+        get(skeleton, parents.as_mut_ptr(), 30),
+        vr::EVRInputError::BufferTooSmall
+    );
+    assert_eq!(
+        get(skeleton, parents.as_mut_ptr(), 0),
+        vr::EVRInputError::BufferTooSmall
+    );
+    assert_eq!(parents, [i32::MIN; 31]);
+
+    assert_eq!(
+        get(skeleton, std::ptr::null_mut(), 31),
+        vr::EVRInputError::InvalidParam
+    );
+    assert_eq!(
+        get(boolact, parents.as_mut_ptr(), 31),
+        vr::EVRInputError::WrongType
+    );
+    assert_eq!(
+        get(0xdead_beef, parents.as_mut_ptr(), 31),
+        vr::EVRInputError::InvalidHandle
+    );
+    assert_eq!(parents, [i32::MIN; 31]);
+
+    // a larger array is fine, but only the skeleton's bones are written
+    let mut big = [i32::MIN; 40];
+    assert_eq!(get(skeleton, big.as_mut_ptr(), 40), vr::EVRInputError::None);
+    assert_eq!(big[..31], STEAMVR_BONE_PARENTS);
+    assert_eq!(big[31..], [i32::MIN; 9]);
+}
+
+#[test]
+fn bone_hierarchy_without_loaded_actions() {
+    let f = Fixture::new();
+    let mut parents = [i32::MIN; 31];
+    assert_eq!(
+        vr::IVRInput011_Interface::GetBoneHierarchy(&*f.input, 1, parents.as_mut_ptr(), 31),
+        vr::EVRInputError::InvalidHandle
+    );
+    assert_eq!(parents, [i32::MIN; 31]);
+}
+
+fn get_bone_name(
+    f: &Fixture,
+    skeleton: vr::VRActionHandle_t,
+    bone: i32,
+    buffer: &mut [std::ffi::c_char],
+) -> vr::EVRInputError {
+    vr::IVRInput011_Interface::GetBoneName(
+        &*f.input,
+        skeleton,
+        bone,
+        buffer.as_mut_ptr(),
+        buffer.len() as u32,
+    )
+}
+
+#[test]
+fn bone_names() {
+    let f = Fixture::new();
+    f.load_actions(c"actions.json");
+
+    for (action, expected) in [
+        (c"/actions/set1/in/SkellyL", STEAMVR_BONE_NAMES_LEFT),
+        (c"/actions/set1/in/SkellyR", STEAMVR_BONE_NAMES_RIGHT),
+    ] {
+        let skeleton = f.get_action_handle(action);
+
+        for (bone, expected) in expected.iter().enumerate() {
+            // OpenVR's k_unMaxBoneNameLength
+            let mut buffer = [0x55; 32];
+            assert_eq!(
+                get_bone_name(&f, skeleton, bone as i32, &mut buffer),
+                vr::EVRInputError::None
+            );
+            let name = unsafe { CStr::from_ptr(buffer.as_ptr()) };
+            assert_eq!(name.to_str().unwrap(), *expected);
+
+            // a buffer that is exactly large enough for the name and its terminator
+            let mut exact = vec![0x55; expected.len() + 1];
+            assert_eq!(
+                get_bone_name(&f, skeleton, bone as i32, &mut exact),
+                vr::EVRInputError::None
+            );
+            assert_eq!(
+                unsafe { CStr::from_ptr(exact.as_ptr()) }.to_str().unwrap(),
+                *expected
+            );
+
+            // one byte short: error, nothing written
+            let mut short = vec![0x55; expected.len()];
+            assert_eq!(
+                get_bone_name(&f, skeleton, bone as i32, &mut short),
+                vr::EVRInputError::BufferTooSmall
+            );
+            assert!(short.iter().all(|c| *c == 0x55));
+        }
+    }
+}
+
+#[test]
+fn bone_name_bad_params() {
+    let f = Fixture::new();
+    f.load_actions(c"actions.json");
+    let skeleton = f.get_action_handle(c"/actions/set1/in/SkellyL");
+    let boolact = f.get_action_handle(c"/actions/set1/in/boolact");
+
+    let mut buffer = [0x55; 32];
+    for bone in [-1, 31, 32, i32::MAX, i32::MIN] {
+        assert_eq!(
+            get_bone_name(&f, skeleton, bone, &mut buffer),
+            vr::EVRInputError::InvalidBoneIndex,
+            "bone {bone}"
+        );
+    }
+    assert_eq!(
+        get_bone_name(&f, boolact, 0, &mut buffer),
+        vr::EVRInputError::WrongType
+    );
+    assert_eq!(
+        get_bone_name(&f, 0xdead_beef, 0, &mut buffer),
+        vr::EVRInputError::InvalidHandle
+    );
+    assert_eq!(
+        get_bone_name(&f, skeleton, 0, &mut []),
+        vr::EVRInputError::BufferTooSmall
+    );
+    assert!(buffer.iter().all(|c| *c == 0x55));
+
+    assert_eq!(
+        vr::IVRInput011_Interface::GetBoneName(&*f.input, skeleton, 0, std::ptr::null_mut(), 32),
+        vr::EVRInputError::InvalidParam
+    );
+}
+
+#[test]
+fn compressed_skeletal_data_is_unsupported() {
+    let f = Fixture::new();
+    f.load_actions(c"actions.json");
+    let skeleton = f.get_action_handle(c"/actions/set1/in/SkellyR");
+
+    let mut data = [0x55u8; 64];
+    let mut required = 0xdead_beef;
+    assert_eq!(
+        vr::IVRInput011_Interface::GetSkeletalBoneDataCompressed(
+            &*f.input,
+            skeleton,
+            vr::EVRSkeletalMotionRange::WithController,
+            data.as_mut_ptr().cast(),
+            data.len() as u32,
+            &mut required,
+        ),
+        vr::EVRInputError::NoData
+    );
+    // no compressed data is produced
+    assert_eq!(required, 0);
+    assert_eq!(data, [0x55u8; 64]);
+
+    // null output pointers are not dereferenced
+    assert_eq!(
+        vr::IVRInput011_Interface::GetSkeletalBoneDataCompressed(
+            &*f.input,
+            skeleton,
+            vr::EVRSkeletalMotionRange::WithController,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+        ),
+        vr::EVRInputError::NoData
+    );
+
+    let compressed = [0x55u8; 16];
+    let mut bones = [vr::VRBoneTransform_t::default(); 31];
+    assert_eq!(
+        vr::IVRInput011_Interface::DecompressSkeletalBoneData(
+            &*f.input,
+            compressed.as_ptr().cast(),
+            compressed.len() as u32,
+            vr::EVRSkeletalTransformSpace::Parent,
+            bones.as_mut_ptr(),
+            bones.len() as u32,
+        ),
+        vr::EVRInputError::InvalidCompressedData
+    );
+    // the bones must not be fabricated
+    assert!(bones.iter().all(|b| b.position.v == [0.0; 4]));
+    assert!(bones.iter().all(|b| b.orientation.w == 0.0));
+
+    assert_eq!(
+        vr::IVRInput011_Interface::DecompressSkeletalBoneData(
+            &*f.input,
+            std::ptr::null(),
+            0,
+            vr::EVRSkeletalTransformSpace::Parent,
+            std::ptr::null_mut(),
+            0,
+        ),
+        vr::EVRInputError::InvalidCompressedData
+    );
+}
+
+#[test]
+fn legacy_004_compressed_skeletal_data_is_unsupported() {
+    let f = Fixture::new();
+    f.load_actions(c"actions.json");
+    let skeleton = f.get_action_handle(c"/actions/set1/in/SkellyR");
+
+    let mut data = [0x55u8; 64];
+    let mut required = 0xdead_beef;
+    assert_eq!(
+        vr::IVRInput004On005::GetSkeletalBoneDataCompressed(
+            &*f.input,
+            skeleton,
+            vr::EVRSkeletalTransformSpace::Parent,
+            vr::EVRSkeletalMotionRange::WithController,
+            data.as_mut_ptr().cast(),
+            data.len() as u32,
+            &mut required,
+            vr::k_ulInvalidInputValueHandle,
+        ),
+        vr::EVRInputError::NoData
+    );
+    assert_eq!(required, 0);
+    assert_eq!(data, [0x55u8; 64]);
+
+    assert_eq!(
+        vr::IVRInput004On005::GetSkeletalBoneDataCompressed(
+            &*f.input,
+            skeleton,
+            vr::EVRSkeletalTransformSpace::Parent,
+            vr::EVRSkeletalMotionRange::WithController,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            vr::k_ulInvalidInputValueHandle,
+        ),
+        vr::EVRInputError::NoData
+    );
+
+    let mut compressed = [0x55u8; 16];
+    let mut space = vr::EVRSkeletalTransformSpace::Model;
+    let mut bones = [vr::VRBoneTransform_t::default(); 31];
+    assert_eq!(
+        vr::IVRInput004On005::DecompressSkeletalBoneData(
+            &*f.input,
+            compressed.as_mut_ptr().cast(),
+            compressed.len() as u32,
+            &mut space,
+            bones.as_mut_ptr(),
+            bones.len() as u32,
+        ),
+        vr::EVRInputError::InvalidCompressedData
+    );
+    assert_eq!(space, vr::EVRSkeletalTransformSpace::Model);
+    assert!(bones.iter().all(|b| b.position.v == [0.0; 4]));
+    assert!(bones.iter().all(|b| b.orientation.w == 0.0));
+
+    assert_eq!(
+        vr::IVRInput004On005::DecompressSkeletalBoneData(
+            &*f.input,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+        ),
+        vr::EVRInputError::InvalidCompressedData
+    );
+}
