@@ -140,8 +140,8 @@ gen_vtable! {
 
                 let msg = cr#"{"type": "ready"}"#;
                 let msg_len = msg.count_bytes() as u32 + 1;
-                unsafe {
-                    *len.as_mut().unwrap() = msg_len;
+                if let Some(len) = unsafe { len.as_mut() } {
+                    *len = msg_len;
                 }
 
                 if out_len < msg_len {
@@ -176,3 +176,32 @@ seq!(N in 0..=25 {
         }
     });
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mailbox_ready_message_without_length() {
+        let mut buf = [0x55 as c_char; 32];
+        let mut read = |len: *mut u32| {
+            Mailbox::undoc4(
+                std::ptr::null_mut(),
+                MailboxHandle(1),
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                len,
+            )
+        };
+
+        // The length is optional. This is the first read, so it gets the message.
+        assert_eq!(read(std::ptr::null_mut()), 0);
+        // The message is only delivered once.
+        let mut len = 0;
+        assert_eq!(read(&mut len), 1);
+        assert_eq!(len, 0);
+
+        let message = unsafe { CStr::from_ptr(buf.as_ptr()) };
+        assert_eq!(message, cr#"{"type": "ready"}"#);
+    }
+}
