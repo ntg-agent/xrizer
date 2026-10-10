@@ -2343,6 +2343,59 @@ mod tests {
     }
 
     #[test]
+    fn overlay_swapchain_image_failure() {
+        use crate::overlay::OverlayMan;
+        use vr::IVROverlay027_Interface;
+
+        let f = Fixture::new();
+        let overlays = Arc::new(OverlayMan::new(f.comp.openxr.clone(), &Injector::default()));
+        f.comp.overlays.set(Arc::downgrade(&overlays));
+        overlays.compositor.set(Arc::downgrade(&f.comp));
+
+        let mut overlay = 0;
+        assert_eq!(
+            overlays.CreateOverlay(
+                c"test_overlay".as_ptr(),
+                c"TestOverlay".as_ptr(),
+                &mut overlay
+            ),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(overlays.ShowOverlay(overlay), vr::EVROverlayError::None);
+        f.ensure_real_session(false);
+
+        let set_texture = || overlays.SetOverlayTexture(overlay, &FakeGraphicsData::texture(&f.vk));
+        let layer_count = || {
+            let session = f.comp.openxr.session_data.get();
+            overlays.get_layers::<FakeApi>(&session, false).len()
+        };
+
+        // The runtime failing to enumerate, wait for or release the image of an overlay's swapchain
+        // must not panic. The overlay has no texture then, and no layer.
+        ENUMERATE_IMAGES_FAILURE.set(Some(RUNTIME_FAILURE));
+        assert_eq!(set_texture(), vr::EVROverlayError::RequestFailed);
+        ENUMERATE_IMAGES_FAILURE.set(Option::None);
+        assert_eq!(layer_count(), 0);
+
+        for call in [
+            fakexr::Call::WaitSwapchainImage,
+            fakexr::Call::ReleaseSwapchainImage,
+        ] {
+            assert_eq!(set_texture(), vr::EVROverlayError::None);
+            assert_eq!(layer_count(), 1);
+            fail_call(call, RUNTIME_FAILURE);
+            assert_eq!(set_texture(), vr::EVROverlayError::RequestFailed);
+            restore_call(call);
+            assert_eq!(layer_count(), 0);
+        }
+
+        // The swapchain that had the failure was dropped, so the next texture gets a new one.
+        assert_eq!(set_texture(), vr::EVROverlayError::None);
+        assert_eq!(layer_count(), 1);
+        assert_eq!(set_texture(), vr::EVROverlayError::None);
+    }
+
+    #[test]
     fn error_on_multiple_same_eye_submit() {
         let f = Fixture::new();
 

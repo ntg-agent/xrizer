@@ -577,9 +577,10 @@ impl Overlay {
                     crate::warn_once!("Failed to create overlay swapchain: {}", e);
                     vr::EVROverlayError::RequestFailed
                 })?;
-                let images = swapchain
-                    .enumerate_images()
-                    .expect("Couldn't enumerate swapchain images");
+                let images = swapchain.enumerate_images().map_err(|e| {
+                    crate::warn_once!("Failed to enumerate overlay swapchain images: {}", e);
+                    vr::EVROverlayError::RequestFailed
+                })?;
                 backend.store_swapchain_images(images, info.format);
                 Ok(SwapchainData {
                     swapchain,
@@ -602,10 +603,20 @@ impl Overlay {
                 crate::warn_once!("Failed to acquire overlay swapchain image: {}", e);
                 vr::EVROverlayError::RequestFailed
             })?;
-            swapchain.wait_image(xr::Duration::INFINITE).unwrap();
+            // The image stays acquired if we can't wait for it or release it, which makes the
+            // swapchain unusable. Drop it, and the next texture gets a new one.
+            if let Err(e) = swapchain.wait_image(xr::Duration::INFINITE) {
+                crate::warn_once!("Failed to wait for overlay swapchain image: {}", e);
+                map.remove(key);
+                return Err(vr::EVROverlayError::RequestFailed);
+            }
 
             let extent = backend.copy_overlay_to_swapchain(b_texture, texture_bounds, idx as usize);
-            swapchain.release_image().unwrap();
+            if let Err(e) = swapchain.release_image() {
+                crate::warn_once!("Failed to release overlay swapchain image: {}", e);
+                map.remove(key);
+                return Err(vr::EVROverlayError::RequestFailed);
+            }
 
             Ok(extent)
         }
