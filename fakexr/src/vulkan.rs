@@ -1,6 +1,7 @@
 use ash::vk::{self, Handle};
 use openxr_sys as xr_sys;
 use paste::paste;
+use std::cell::Cell;
 use std::ffi::{CStr, c_char};
 
 macro_rules! get_fn {
@@ -131,8 +132,20 @@ extern "system" fn get_device_queue(
     }
 }
 
+thread_local! {
+    static FAIL_NEXT_DEVICE_WAIT_IDLE: Cell<Option<vk::Result>> = const { Cell::new(None) };
+}
+
+/// Makes the next vkDeviceWaitIdle call made on this thread return `result`.
+/// Later calls succeed again.
+pub fn fail_next_device_wait_idle(result: vk::Result) {
+    FAIL_NEXT_DEVICE_WAIT_IDLE.set(Some(result));
+}
+
 extern "system" fn device_wait_idle(_: vk::Device) -> vk::Result {
-    vk::Result::SUCCESS
+    FAIL_NEXT_DEVICE_WAIT_IDLE
+        .take()
+        .unwrap_or(vk::Result::SUCCESS)
 }
 
 extern "system" fn get_physical_device_queue_family_properties(
