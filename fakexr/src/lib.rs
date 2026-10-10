@@ -207,6 +207,7 @@ pub enum Call {
     /// xrGetActionStatePose.
     GetActionState,
     GetCurrentInteractionProfile,
+    PathToString,
     ApplyHapticFeedback,
     LocateSpace,
     CreateActionSpace,
@@ -1395,6 +1396,7 @@ extern "system" fn path_to_string(
     output: *mut u32,
     buffer: *mut c_char,
 ) -> xr::Result {
+    fail_if_requested!(PathToString);
     let instance = get_handle!(instance);
     let key = DefaultKey::from(KeyData::from_ffi(path.into_raw()));
     let paths = instance.paths.lock().unwrap();
