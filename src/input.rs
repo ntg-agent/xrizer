@@ -444,10 +444,9 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         info: *mut vr::InputOriginInfo_t,
         info_size: u32,
     ) -> vr::EVRInputError {
-        assert_eq!(
-            info_size as usize,
-            std::mem::size_of::<vr::InputOriginInfo_t>()
-        );
+        if info_size as usize != std::mem::size_of::<vr::InputOriginInfo_t>() || info.is_null() {
+            return vr::EVRInputError::InvalidParam;
+        }
 
         let key = InputSourceKey::from(KeyData::from_ffi(handle));
         let map = self.input_source_map.read().unwrap();
@@ -469,11 +468,11 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         };
 
         unsafe {
-            *info.as_mut().unwrap() = vr::InputOriginInfo_t {
+            info.write(vr::InputOriginInfo_t {
                 devicePath: handle,
                 trackedDeviceIndex: index,
                 rchRenderModelComponentName: [0; 128],
-            };
+            });
         }
         vr::EVRInputError::None
     }
@@ -596,8 +595,14 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         if transform_array_count < skeletal::HandSkeletonBone::Count as u32 {
             return vr::EVRInputError::BufferTooSmall;
         }
+        if transform_array.is_null() {
+            return vr::EVRInputError::InvalidParam;
+        }
         let transforms = unsafe {
-            std::slice::from_raw_parts_mut(transform_array, transform_array_count as usize)
+            std::slice::from_raw_parts_mut(
+                transform_array,
+                skeletal::HandSkeletonBone::Count as usize,
+            )
         };
 
         get_action_from_handle!(self, handle, session_data, action);
@@ -649,12 +654,17 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         // As far as I'm aware this is only/mainly used by HL:A
         // For some reason it is required to position the wrist bone at all times, at least when it comes to Quest controllers
 
-        assert_eq!(
-            transform_array_count,
-            skeletal::HandSkeletonBone::Count as u32
-        );
+        if transform_array_count < skeletal::HandSkeletonBone::Count as u32 {
+            return vr::EVRInputError::BufferTooSmall;
+        }
+        if transform_array.is_null() {
+            return vr::EVRInputError::InvalidParam;
+        }
         let transforms = unsafe {
-            std::slice::from_raw_parts_mut(transform_array, transform_array_count as usize)
+            std::slice::from_raw_parts_mut(
+                transform_array,
+                skeletal::HandSkeletonBone::Count as usize,
+            )
         };
 
         get_action_from_handle!(self, handle, session_data, action);
@@ -792,10 +802,11 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         action_data_size: u32,
         restrict_to_device: vr::VRInputValueHandle_t,
     ) -> vr::EVRInputError {
-        assert_eq!(
-            action_data_size as usize,
-            std::mem::size_of::<vr::InputPoseActionData_t>()
-        );
+        if action_data_size as usize != std::mem::size_of::<vr::InputPoseActionData_t>()
+            || action_data.is_null()
+        {
+            return vr::EVRInputError::InvalidParam;
+        }
 
         if log::log_enabled!(log::Level::Trace) {
             let action_map = self.action_map.read().unwrap();
@@ -952,10 +963,11 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         action_data_size: u32,
         restrict_to_device: vr::VRInputValueHandle_t,
     ) -> vr::EVRInputError {
-        assert_eq!(
-            action_data_size as usize,
-            std::mem::size_of::<vr::InputAnalogActionData_t>()
-        );
+        if action_data_size as usize != std::mem::size_of::<vr::InputAnalogActionData_t>()
+            || action_data.is_null()
+        {
+            return vr::EVRInputError::InvalidParam;
+        }
 
         let mut out = WriteOnDrop::new(action_data);
         get_action_from_handle!(self, handle, session_data, action, loaded);
@@ -1035,10 +1047,11 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         action_data_size: u32,
         restrict_to_device: vr::VRInputValueHandle_t,
     ) -> vr::EVRInputError {
-        assert_eq!(
-            action_data_size as usize,
-            std::mem::size_of::<vr::InputDigitalActionData_t>()
-        );
+        if action_data_size as usize != std::mem::size_of::<vr::InputDigitalActionData_t>()
+            || action_data.is_null()
+        {
+            return vr::EVRInputError::InvalidParam;
+        }
 
         let mut out = WriteOnDrop::new(action_data);
 
@@ -1125,13 +1138,15 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         active_set_size: u32,
         active_set_count: u32,
     ) -> vr::EVRInputError {
-        assert_eq!(
-            active_set_size as usize,
-            std::mem::size_of::<vr::VRActiveActionSet_t>()
-        );
+        if active_set_size as usize != std::mem::size_of::<vr::VRActiveActionSet_t>() {
+            return vr::EVRInputError::InvalidParam;
+        }
         // alyx
         if active_set_count == 0 {
             return vr::EVRInputError::NoActiveActionSet;
+        }
+        if active_sets.is_null() {
+            return vr::EVRInputError::InvalidParam;
         }
 
         let active_sets =
