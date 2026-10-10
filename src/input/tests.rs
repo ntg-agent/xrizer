@@ -2258,3 +2258,70 @@ fn action_data_runtime_failure() {
     assert_eq!(analog(vec1act).x, 0.5);
     assert!(skeletal_active());
 }
+
+#[test]
+fn haptic_runtime_failure() {
+    let f = Fixture::new();
+    f.load_actions(c"actions.json");
+    let vibration = f.get_action_handle(c"/actions/set1/in/vib");
+    let haptic = f.get_action::<xr::Haptic>(vibration);
+    let left = f.get_input_source_handle(c"/user/hand/left");
+    let trigger = || {
+        f.input
+            .TriggerHapticVibrationAction(vibration, 0.0, 0.1, 100.0, 1.0, left)
+    };
+
+    // The runtime failing xrApplyHapticFeedback must not abort the game.
+    fail_call(fakexr::Call::ApplyHapticFeedback, SESSION_LOST);
+    assert_eq!(trigger(), vr::EVRInputError::IPCError);
+    assert!(!fakexr::is_haptic_activated(haptic, LeftHand));
+
+    restore_call(fakexr::Call::ApplyHapticFeedback);
+    assert_eq!(trigger(), vr::EVRInputError::None);
+    assert!(fakexr::is_haptic_activated(haptic, LeftHand));
+}
+
+// miri doesn't let fakexr read the vibration
+#[test]
+#[cfg_attr(miri, ignore)]
+fn haptic_parameters_are_clamped() {
+    let f = Fixture::new();
+    f.load_actions(c"actions.json");
+    let vibration = f.get_action_handle(c"/actions/set1/in/vib");
+    let haptic = f.get_action::<xr::Haptic>(vibration);
+    let left = f.get_input_source_handle(c"/user/hand/left");
+    let trigger = |duration, frequency, amplitude| {
+        assert_eq!(
+            f.input
+                .TriggerHapticVibrationAction(vibration, 0.0, duration, frequency, amplitude, left),
+            vr::EVRInputError::None
+        );
+        fakexr::last_haptic_vibration(haptic, LeftHand).expect("no vibration was applied")
+    };
+    let vibration = |amplitude, frequency, duration_secs: i64| fakexr::Vibration {
+        amplitude,
+        frequency,
+        duration_nanos: duration_secs * 1_000_000_000,
+    };
+
+    // values in range are passed on
+    assert_eq!(
+        trigger(0.5, 100.0, 0.5),
+        fakexr::Vibration {
+            amplitude: 0.5,
+            frequency: 100.0,
+            duration_nanos: 500_000_000
+        }
+    );
+    // The runtime is allowed to reject anything else. Zero is "unspecified" for the frequency.
+    assert_eq!(trigger(-1.0, -5.0, 2.0), vibration(1.0, 0.0, 0));
+    assert_eq!(trigger(1e9, 1e9, -1.0), vibration(0.0, 10_000.0, 10));
+    assert_eq!(
+        trigger(f32::INFINITY, f32::INFINITY, f32::INFINITY),
+        vibration(1.0, 10_000.0, 10)
+    );
+    assert_eq!(
+        trigger(f32::NAN, f32::NAN, f32::NAN),
+        vibration(0.0, 0.0, 0)
+    );
+}

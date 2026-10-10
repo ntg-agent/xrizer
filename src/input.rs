@@ -69,6 +69,11 @@ pub struct Input<C: openxr_data::Compositor> {
     synced_user_present_changed: AtomicBool,
 }
 
+/// The longest haptic pulse we ask the runtime for, in seconds.
+const MAX_HAPTIC_DURATION_SECONDS: f32 = 10.0;
+/// The highest haptic frequency we ask the runtime for, in hertz.
+const MAX_HAPTIC_FREQUENCY: f32 = 10_000.0;
+
 struct InputEvent {
     ty: vr::EVREventType,
     index: vr::TrackedDeviceIndex_t,
@@ -543,16 +548,26 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             warn!("start_seconds_from_now: {start_seconds_from_now}")
         }
 
-        action
-            .apply_feedback(
-                &session_data.session,
-                subaction_path,
-                &xr::HapticVibration::new()
-                    .amplitude(amplitude.clamp(0.0, 1.0))
-                    .frequency(frequency)
-                    .duration(xr::Duration::from_nanos((duration_seconds * 1e9) as _)),
-            )
-            .unwrap();
+        // The runtime is allowed to reject values out of range, so don't pass those on.
+        let clamp = |value: f32, max| {
+            if value.is_nan() {
+                0.0
+            } else {
+                value.clamp(0.0, max)
+            }
+        };
+        let duration_seconds = clamp(duration_seconds, MAX_HAPTIC_DURATION_SECONDS);
+        if let Err(err) = action.apply_feedback(
+            &session_data.session,
+            subaction_path,
+            &xr::HapticVibration::new()
+                .amplitude(clamp(amplitude, 1.0))
+                .frequency(clamp(frequency, MAX_HAPTIC_FREQUENCY))
+                .duration(xr::Duration::from_nanos((duration_seconds * 1e9) as _)),
+        ) {
+            crate::warn_once!("Failed to trigger haptic: {}", err);
+            return vr::EVRInputError::IPCError;
+        }
 
         vr::EVRInputError::None
     }

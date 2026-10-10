@@ -163,17 +163,16 @@ impl<C: openxr_data::Compositor> Input<C> {
         duration_us: ::std::ffi::c_ushort,
     ) {
         trace!("triggered legacy haptic while using action manifest");
-        manifest_actions
-            .haptic_action
-            .apply_feedback(
-                &self.openxr.session_data.get().session,
-                hand_path,
-                &xr::HapticVibration::new()
-                    .amplitude(1.0)
-                    .frequency(xr::FREQUENCY_UNSPECIFIED)
-                    .duration(xr::Duration::from_nanos(i64::from(duration_us) * 1000)),
-            )
-            .unwrap();
+        if let Err(err) = manifest_actions.haptic_action.apply_feedback(
+            &self.openxr.session_data.get().session,
+            hand_path,
+            &xr::HapticVibration::new()
+                .amplitude(1.0)
+                .frequency(xr::FREQUENCY_UNSPECIFIED)
+                .duration(xr::Duration::from_nanos(i64::from(duration_us) * 1000)),
+        ) {
+            crate::warn_once!("Failed to trigger haptic: {}", err);
+        }
     }
 
     pub fn get_legacy_controller_state(
@@ -946,6 +945,46 @@ mod tests {
         assert!(fakexr::is_haptic_activated(
             haptic,
             fakexr::UserPath::RightHand
+        ));
+    }
+
+    #[test]
+    fn legacy_haptic_with_action_manifest_runtime_failure() {
+        let mut f = Fixture::new();
+        f.load_actions(c"actions.json");
+        f.input.openxr.restart_session();
+        f.set_interaction_profile::<SimpleController>(fakexr::UserPath::LeftHand);
+        f.input.openxr.poll_events();
+        f.input.frame_start_update();
+        f.input.openxr.poll_events();
+        f.input.frame_start_update();
+        let haptic = f
+            .input
+            .openxr
+            .session_data
+            .get()
+            .input_data
+            .get_loaded_actions()
+            .unwrap()
+            .haptic_action
+            .as_raw();
+
+        // The runtime failing xrApplyHapticFeedback must not abort the game.
+        fakexr::set_call_failure(
+            fakexr::Call::ApplyHapticFeedback,
+            Some(xr::sys::Result::ERROR_SESSION_LOST),
+        );
+        f.input.legacy_haptic(1, 0, 3000);
+        assert!(!fakexr::is_haptic_activated(
+            haptic,
+            fakexr::UserPath::LeftHand
+        ));
+
+        fakexr::set_call_failure(fakexr::Call::ApplyHapticFeedback, None);
+        f.input.legacy_haptic(1, 0, 3000);
+        assert!(fakexr::is_haptic_activated(
+            haptic,
+            fakexr::UserPath::LeftHand
         ));
     }
 
