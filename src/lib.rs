@@ -99,6 +99,15 @@ macro_rules! atomic_float {
 atomic_float!(AtomicF32, f32, AtomicU32);
 atomic_float!(AtomicF64, f64, AtomicU64);
 
+/// Borrows a C string argument of an interface method. `None` if the application passed null.
+///
+/// # Safety
+///
+/// `ptr` must be null or point to a nul-terminated string that is valid for `'a`.
+unsafe fn cstr_arg<'a>(ptr: *const c_char) -> Option<&'a CStr> {
+    (!ptr.is_null()).then(|| unsafe { CStr::from_ptr(ptr) })
+}
+
 /// Whether a panic was caused by the OpenXR runtime going away (e.g. the runtime was stopped or
 /// crashed). That is usually not xrizer's fault, so there's no point in showing the error dialog.
 fn is_runtime_lost(panic_message: &str) -> bool {
