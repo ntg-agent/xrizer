@@ -284,7 +284,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                 }
             };
 
-            let bindings = match serde_json::from_slice(&data) {
+            let bindings: bindings::Bindings = match serde_json::from_slice(&data) {
                 Ok(bindings) => bindings,
                 Err(e) => {
                     error!("Failed to parse bindings for {controller_type:?}: {e}");
@@ -293,6 +293,9 @@ impl<C: openxr_data::Compositor> Input<C> {
             };
 
             match controller_type {
+                actions::ControllerType::GenericHmd => {
+                    bindings::handle_head_bindings(context, &bindings.bindings)
+                }
                 actions::ControllerType::Unknown(ref other) => {
                     info!("Ignoring bindings for unknown profile {other}")
                 }

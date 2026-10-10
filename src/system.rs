@@ -930,6 +930,15 @@ impl vr::IVRSystem026_Interface for System {
         err: *mut vr::ETrackedPropertyError,
     ) -> bool {
         debug!(target: log_tags::TRACKED_PROP, "requesting bool property: {prop:?} ({device_index})");
+        if device_index == vr::k_unTrackedDeviceIndex_Hmd
+            && prop == vr::ETrackedDeviceProperty::ContainsProximitySensor_Bool
+        {
+            // OpenXR doesn't have a proximity sensor, but it can tell us if the user is present.
+            if let Some(err) = unsafe { err.as_mut() } {
+                *err = vr::ETrackedPropertyError::Success;
+            }
+            return self.openxr.user_presence().is_some();
+        }
         if let Some(err) = unsafe { err.as_mut() } {
             *err = vr::ETrackedPropertyError::UnknownProperty;
         }
@@ -1025,7 +1034,10 @@ impl vr::IVRSystem026_Interface for System {
         device_index: vr::TrackedDeviceIndex_t,
     ) -> vr::EDeviceActivityLevel {
         match device_index {
-            vr::k_unTrackedDeviceIndex_Hmd => vr::EDeviceActivityLevel::UserInteraction,
+            vr::k_unTrackedDeviceIndex_Hmd => match self.openxr.user_presence() {
+                Some(false) => vr::EDeviceActivityLevel::Idle,
+                _ => vr::EDeviceActivityLevel::UserInteraction,
+            },
             x if self
                 .input
                 .get()
@@ -1475,5 +1487,121 @@ mod tests {
         assert!(!vr::IVRSystem026_Interface::IsSteamVRDrawingControllers(
             &system
         ));
+    }
+
+    struct PresenceFixture {
+        xr: Arc<RealOpenXrData>,
+        system: System,
+        _input: Arc<Input<crate::compositor::Compositor>>,
+    }
+
+    impl PresenceFixture {
+        fn new() -> Self {
+            let xr = Arc::new(OpenXrData::new(&Injector::default()).unwrap());
+            let injector = Injector::default();
+            let input = Arc::new(Input::new(xr.clone()));
+            xr.input.set(Arc::downgrade(&input));
+            let system = System::new(xr.clone(), &injector);
+            system.input.set(Arc::downgrade(&input));
+            Self {
+                xr,
+                system,
+                _input: input,
+            }
+        }
+
+        fn set_user_present(&self, present: bool) {
+            fakexr::set_user_presence(self.xr.session_data.get().session.as_raw(), present);
+            self.xr.poll_events();
+        }
+
+        fn has_proximity_sensor(&self) -> (bool, vr::ETrackedPropertyError) {
+            let mut err = vr::ETrackedPropertyError::UnknownProperty;
+            let ret = self.system.GetBoolTrackedDeviceProperty(
+                vr::k_unTrackedDeviceIndex_Hmd,
+                vr::ETrackedDeviceProperty::ContainsProximitySensor_Bool,
+                &mut err,
+            );
+            (ret, err)
+        }
+
+        fn hmd_activity_level(&self) -> vr::EDeviceActivityLevel {
+            self.system
+                .GetTrackedDeviceActivityLevel(vr::k_unTrackedDeviceIndex_Hmd)
+        }
+
+        /// Returns the (event type, device index) of every event currently queued.
+        fn poll_events(&self) -> Vec<(u32, vr::TrackedDeviceIndex_t)> {
+            let mut events = Vec::new();
+            let mut event = vr::VREvent_t::default();
+            while self
+                .system
+                .PollNextEvent(&mut event, std::mem::size_of_val(&event) as u32)
+            {
+                events.push((event.eventType, event.trackedDeviceIndex));
+            }
+            events
+        }
+    }
+
+    #[test]
+    fn hmd_user_presence() {
+        const STARTED: u32 = vr::EVREventType::TrackedDeviceUserInteractionStarted as u32;
+        const ENDED: u32 = vr::EVREventType::TrackedDeviceUserInteractionEnded as u32;
+        let f = PresenceFixture::new();
+        let hmd = vr::k_unTrackedDeviceIndex_Hmd;
+
+        // The user is present until the runtime says otherwise.
+        assert_eq!(
+            f.has_proximity_sensor(),
+            (true, vr::ETrackedPropertyError::Success)
+        );
+        assert_eq!(
+            f.hmd_activity_level(),
+            vr::EDeviceActivityLevel::UserInteraction
+        );
+        let events = f.poll_events();
+        assert!(!events.contains(&(STARTED, hmd)) && !events.contains(&(ENDED, hmd)));
+
+        f.set_user_present(false);
+        assert_eq!(f.hmd_activity_level(), vr::EDeviceActivityLevel::Idle);
+        assert_eq!(f.poll_events(), [(ENDED, hmd)]);
+
+        // No change, no event.
+        f.set_user_present(false);
+        assert_eq!(f.hmd_activity_level(), vr::EDeviceActivityLevel::Idle);
+        assert_eq!(f.poll_events(), []);
+
+        f.set_user_present(true);
+        assert_eq!(
+            f.hmd_activity_level(),
+            vr::EDeviceActivityLevel::UserInteraction
+        );
+        assert_eq!(f.poll_events(), [(STARTED, hmd)]);
+    }
+
+    #[test]
+    fn hmd_user_presence_without_runtime_support() {
+        fakexr::set_user_presence_supported(false);
+        let f = PresenceFixture::new();
+        fakexr::set_user_presence_supported(true);
+
+        assert_eq!(
+            f.has_proximity_sensor(),
+            (false, vr::ETrackedPropertyError::Success)
+        );
+
+        // The state we report must not be influenced by events from a runtime that told us it
+        // doesn't do user presence sensing.
+        f.set_user_present(false);
+        assert_eq!(
+            f.hmd_activity_level(),
+            vr::EDeviceActivityLevel::UserInteraction
+        );
+        assert!(
+            f.poll_events()
+                .iter()
+                .all(|(ty, _)| *ty != vr::EVREventType::TrackedDeviceUserInteractionEnded as u32)
+        );
     }
 }

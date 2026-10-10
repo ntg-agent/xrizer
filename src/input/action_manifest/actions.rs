@@ -41,6 +41,9 @@ pub enum ControllerType {
     ViveFocus3,
     Knuckles,
     OculusTouch,
+    /// Bindings for the HMD itself, i.e., /user/head/proximity. There's no OpenXR interaction
+    /// profile for it.
+    GenericHmd,
     #[serde(untagged)]
     Unknown(String),
 }

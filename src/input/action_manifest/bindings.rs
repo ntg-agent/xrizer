@@ -1,6 +1,8 @@
 #![allow(private_interfaces)]
 
-use super::context::{BindingsProfileLoadContext, DpadActivatorData, DpadHapticData};
+use super::context::{
+    BindingsLoadContext, BindingsProfileLoadContext, DpadActivatorData, DpadHapticData,
+};
 use crate::input::action_manifest::context;
 use crate::input::profiles::paths::DynComponent;
 use crate::input::profiles::{Component, DynInputPath, paths};
@@ -129,16 +131,23 @@ pub struct SimpleActionBinding {
     path: String,
 }
 
+const HEAD_PROXIMITY_PATH: &str = "/user/head/proximity";
+
 /// Note that when this is used, it's typically missing the final component
 #[derive(Deserialize)]
 #[serde(from = "String")]
 enum MaybeInputPath {
     Valid(DynInputPath),
+    // The only input path of the HMD ("generic_hmd" controller type), which isn't an OpenXR path.
+    HeadProximity,
     Invalid { path: String, error: String },
 }
 
 impl From<String> for MaybeInputPath {
     fn from(value: String) -> Self {
+        if value == HEAD_PROXIMITY_PATH {
+            return Self::HeadProximity;
+        }
         match value.parse() {
             Ok(path) => Self::Valid(path),
             Err(error) => Self::Invalid { path: value, error },
@@ -183,6 +192,12 @@ impl<Inputs, Parameters> ActionBindingData<Inputs, Parameters> {
                 inputs: &self.inputs,
                 parameters: self.parameters.as_ref(),
             }),
+            MaybeInputPath::HeadProximity => {
+                warn!(
+                    "got {HEAD_PROXIMITY_PATH}, but it is only valid for the generic_hmd profile"
+                );
+                None
+            }
             MaybeInputPath::Invalid { path, error } => {
                 warn!("got invalid input path {path} - {error}");
                 None
@@ -534,6 +549,44 @@ pub fn handle_dpad_binding(
     }
     if let Some((s, p)) = haptic_binding {
         context.push_binding(s, p);
+    }
+}
+
+/// Handles the bindings of the "generic_hmd" controller type. The only thing that can be bound is
+/// /user/head/proximity, which is backed by the user presence reported by the runtime.
+pub fn handle_head_bindings(
+    context: &mut BindingsLoadContext,
+    bindings: &HashMap<String, ActionSetBinding>,
+) {
+    for source in bindings.values().flat_map(|set| &set.sources) {
+        let ActionBinding::Button(ActionBindingData {
+            path: MaybeInputPath::HeadProximity,
+            inputs: ButtonInput { click, .. },
+            ..
+        }) = source
+        else {
+            if !matches!(source, ActionBinding::None(_)) {
+                warn!("Ignoring unsupported binding for the HMD");
+            }
+            continue;
+        };
+
+        let Some(ActionBindingOutput { output, .. }) = click else {
+            continue;
+        };
+        if !matches!(context.actions.get(&output.path), Some(ActionData::Bool(_))) {
+            warn!(
+                "Couldn't find boolean action {} (for path {HEAD_PROXIMITY_PATH})",
+                output.path
+            );
+            continue;
+        }
+        trace!("binding {} to {HEAD_PROXIMITY_PATH}", output.path);
+        context
+            .extra_actions
+            .entry(output.path.clone())
+            .or_default()
+            .head_proximity = true;
     }
 }
 

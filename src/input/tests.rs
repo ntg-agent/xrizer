@@ -1132,3 +1132,84 @@ fn dominant_hand_defaults_to_right() {
         vr::EVRInputError::InvalidParam
     );
 }
+
+#[test]
+fn head_proximity_action_follows_user_presence() {
+    let mut f = Fixture::new();
+    f.load_actions(c"actions_proximity.json");
+
+    let set1 = f.get_action_set_handle(c"/actions/set1");
+    let worn = f.get_action_handle(c"/actions/set1/in/headworn");
+    let head = f.get_input_source_handle(c"/user/head");
+    let left = f.get_input_source_handle(c"/user/hand/left");
+    let sync = |f: &mut Fixture| {
+        f.sync(vr::VRActiveActionSet_t {
+            ulActionSet: set1,
+            ..Default::default()
+        });
+    };
+
+    // The user is present until the runtime says otherwise.
+    sync(&mut f);
+    let state = f.get_bool_state(worn).unwrap();
+    assert!(state.bActive);
+    assert!(state.bState);
+    assert!(!state.bChanged);
+    assert!(f.get_bool_state_hand(worn, head).unwrap().bState);
+
+    // The very first presence event is a removal.
+    fakexr::set_user_presence(f.raw_session(), false);
+    f.input.openxr.poll_events();
+    // The OpenVR state only updates at the next UpdateActionState.
+    assert!(f.get_bool_state(worn).unwrap().bState);
+    sync(&mut f);
+    let state = f.get_bool_state(worn).unwrap();
+    assert!(state.bActive);
+    assert!(!state.bState);
+    assert!(state.bChanged);
+    assert_eq!(state.activeOrigin, head);
+    let state = f.get_bool_state_hand(worn, head).unwrap();
+    assert!(state.bActive);
+    assert!(!state.bState);
+
+    sync(&mut f);
+    let state = f.get_bool_state(worn).unwrap();
+    assert!(state.bActive);
+    assert!(!state.bState);
+    assert!(!state.bChanged);
+
+    fakexr::set_user_presence(f.raw_session(), true);
+    f.input.openxr.poll_events();
+    sync(&mut f);
+    let state = f.get_bool_state(worn).unwrap();
+    assert!(state.bActive);
+    assert!(state.bState);
+    assert!(state.bChanged);
+
+    // The head is not a hand.
+    assert!(!f.get_bool_state_hand(worn, left).unwrap().bActive);
+}
+
+#[test]
+fn head_proximity_action_without_runtime_support() {
+    fakexr::set_user_presence_supported(false);
+    let mut f = Fixture::new();
+    fakexr::set_user_presence_supported(true);
+    f.load_actions(c"actions_proximity.json");
+
+    let set1 = f.get_action_set_handle(c"/actions/set1");
+    let worn = f.get_action_handle(c"/actions/set1/in/headworn");
+
+    // The runtime has no user presence sensing, so we have nothing to report - even if the runtime
+    // sends events anyway.
+    fakexr::set_user_presence(f.raw_session(), false);
+    f.input.openxr.poll_events();
+    f.sync(vr::VRActiveActionSet_t {
+        ulActionSet: set1,
+        ..Default::default()
+    });
+    let state = f.get_bool_state(worn).unwrap();
+    assert!(!state.bActive);
+    assert!(!state.bState);
+    assert!(!state.bChanged);
+}
