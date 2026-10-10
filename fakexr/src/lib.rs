@@ -85,6 +85,25 @@ pub fn is_haptic_activated(action: xr::Action, hand: UserPath) -> bool {
     state
 }
 
+/// The parameters of an XrHapticVibration.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct Vibration {
+    pub amplitude: f32,
+    pub frequency: f32,
+    pub duration_nanos: i64,
+}
+
+/// The vibration that was last applied to the haptic action for the hand. This is always `None`
+/// under miri, see apply_haptic_feedback.
+pub fn last_haptic_vibration(action: xr::Action, hand: UserPath) -> Option<Vibration> {
+    let action = action.to_handle().unwrap();
+    let vibration = match hand {
+        UserPath::LeftHand => &action.last_vibration.left,
+        UserPath::RightHand => &action.last_vibration.right,
+    };
+    *vibration.lock().unwrap()
+}
+
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum UserPath {
     /// /user/hand/left
@@ -913,6 +932,7 @@ struct Action {
     localized_name: CString,
     state: LeftRight<AtomicCell<ActionStateData>>,
     pending_state: AtomicCell<LeftRight<Option<(ActionState, xr::Time)>>>,
+    last_vibration: LeftRight<Mutex<Option<Vibration>>>,
     suggested: Mutex<HashMap<xr::Path, Vec<xr::Path>>>,
 }
 
@@ -1183,6 +1203,7 @@ extern "system" fn create_action(
             right: data.into(),
         },
         pending_state: Default::default(),
+        last_vibration: Default::default(),
         suggested: Mutex::default(),
     });
 
@@ -2103,14 +2124,30 @@ extern "system" fn apply_haptic_feedback(
 
     hand_state.state = ActionState::Haptic(true);
 
+    // The openxr crate only hands us a reference to the header of the vibration, so miri does not
+    // let us read the rest of it.
+    #[cfg(not(miri))]
+    let vibration = {
+        let vibration = unsafe { &*(haptic_feedback as *const xr::HapticVibration) };
+        Some(Vibration {
+            amplitude: vibration.amplitude,
+            frequency: vibration.frequency,
+            duration_nanos: vibration.duration.as_nanos(),
+        })
+    };
+    #[cfg(miri)]
+    let vibration = None;
+
     let instance = session.instance.upgrade().unwrap();
 
     match DefaultKey::from(KeyData::from_ffi(info.subaction_path.into_raw())) {
         x if x == instance.left_hand_key => {
             action.state.left.store(hand_state);
+            *action.last_vibration.left.lock().unwrap() = vibration;
         }
         x if x == instance.right_hand_key => {
             action.state.right.store(hand_state);
+            *action.last_vibration.right.lock().unwrap() = vibration;
         }
         _ => unreachable!(),
     }
