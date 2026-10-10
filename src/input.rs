@@ -1533,14 +1533,16 @@ impl<C: openxr_data::Compositor> Input<C> {
             let mut controller = devices.get_controller_mut(hand);
             let subaction_path = self.get_subaction_path(hand);
 
-            let profile_path = session_data
+            let profile_path = match session_data
                 .session
                 .current_interaction_profile(subaction_path)
-                .unwrap();
-
-            if let Some(controller) = controller.as_mut() {
-                controller.profile_path = profile_path;
-            }
+            {
+                Ok(path) => path,
+                Err(err) => {
+                    crate::warn_once!("Failed to get the interaction profile: {}", err);
+                    continue;
+                }
+            };
 
             let profile_name = match profile_path {
                 xr::Path::NULL => {
@@ -1550,12 +1552,26 @@ impl<C: openxr_data::Compositor> Input<C> {
                     "<null>".to_owned()
                 }
                 path => {
+                    let name = match self.openxr.instance.path_to_string(path) {
+                        Ok(name) => name,
+                        Err(err) => {
+                            crate::warn_once!(
+                                "Failed to get the interaction profile name: {}",
+                                err
+                            );
+                            continue;
+                        }
+                    };
                     if let Some(controller) = controller.as_mut() {
                         controller.connected = true;
                     }
-                    self.openxr.instance.path_to_string(path).unwrap()
+                    name
                 }
             };
+
+            if let Some(controller) = controller.as_mut() {
+                controller.profile_path = profile_path;
+            }
 
             struct Data<'a> {
                 profile_name: &'a str,
@@ -1616,8 +1632,8 @@ impl<C: openxr_data::Compositor> Input<C> {
                 "{} interaction profile changed: {}",
                 self.openxr
                     .instance
-                    .path_to_string(self.get_subaction_path(hand))
-                    .unwrap(),
+                    .path_to_string(subaction_path)
+                    .unwrap_or_else(|_| format!("{hand:?}")),
                 profile_name
             )
         }
@@ -1632,9 +1648,9 @@ impl<C: openxr_data::Compositor> Input<C> {
         }
 
         #[cfg(feature = "monado")]
-        devices
-            .create_monado_generic_trackers(&self.openxr, session_data)
-            .unwrap();
+        if let Err(err) = devices.create_monado_generic_trackers(&self.openxr, session_data) {
+            crate::warn_once!("Failed to create the generic trackers: {}", err);
+        }
     }
 
     pub fn frame_start_update(&self) {
@@ -1977,12 +1993,14 @@ impl HandSpace {
                 },
             };
 
-            *self.raw.write().unwrap() = Some(
-                pose_data
-                    .grip
-                    .create_space(&session_data.session, self.hand_path, offset_pose)
-                    .unwrap(),
-            );
+            let space = pose_data
+                .grip
+                .create_space(&session_data.session, self.hand_path, offset_pose)
+                .inspect_err(|err| {
+                    crate::warn_once!("Failed to create the raw hand space: {}", err)
+                })
+                .ok()?;
+            *self.raw.write().unwrap() = Some(space);
         }
 
         Some(SpaceReadGuard(self.raw.read().unwrap()))
