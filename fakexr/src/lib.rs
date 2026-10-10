@@ -11,7 +11,7 @@ use openxr_sys as xr;
 use openxr_sys::Handle as _;
 use paste::paste;
 use slotmap::{DefaultKey, Key, KeyData, SlotMap};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString, c_char};
 use std::sync::{
@@ -170,6 +170,7 @@ thread_local! {
     static FAIL_NEXT_SWAPCHAIN_CREATE: Cell<Option<xr::Result>> = const { Cell::new(None) };
     static FAIL_NEXT_SWAPCHAIN_ACQUIRE: Cell<Option<xr::Result>> = const { Cell::new(None) };
     static USER_PRESENCE_SUPPORTED: Cell<bool> = const { Cell::new(true) };
+    static CALL_FAILURES: RefCell<HashMap<Call, xr::Result>> = RefCell::new(HashMap::new());
 }
 
 /// While set to `Some(result)`, every `xrLocateViews` call made on the current thread returns
@@ -177,6 +178,57 @@ thread_local! {
 pub fn set_locate_views_failure(result: Option<xr::Result>) {
     LOCATE_VIEWS_FAILURE.set(result);
 }
+
+/// A runtime function that [`set_call_failure`] can make fail.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Call {
+    PollEvent,
+    SyncActions,
+    /// xrGetActionStateBoolean, xrGetActionStateFloat, xrGetActionStateVector2f and
+    /// xrGetActionStatePose.
+    GetActionState,
+    GetCurrentInteractionProfile,
+    ApplyHapticFeedback,
+    LocateSpace,
+    CreateActionSpace,
+    WaitSwapchainImage,
+    ReleaseSwapchainImage,
+    WaitFrame,
+    BeginFrame,
+    EndFrame,
+    /// xrGetVulkanInstanceExtensionsKHR and xrGetVulkanDeviceExtensionsKHR.
+    GetVulkanExtensions,
+    CreateXDevList,
+    CreateXDevSpace,
+}
+
+/// While set to `Some(result)`, every call to `call` made on the current thread returns `result`
+/// without doing anything else. Set it back to `None` to make the calls succeed again.
+pub fn set_call_failure(call: Call, result: Option<xr::Result>) {
+    CALL_FAILURES.with_borrow_mut(|failures| match result {
+        Some(result) => {
+            failures.insert(call, result);
+        }
+        None => {
+            failures.remove(&call);
+        }
+    });
+}
+
+/// The failure that [`set_call_failure`] set for `call`, if any.
+fn call_failure(call: Call) -> Option<xr::Result> {
+    CALL_FAILURES.with_borrow(|failures| failures.get(&call).copied())
+}
+
+/// Returns early with the failure that [`set_call_failure`] set for the call, if any.
+macro_rules! fail_if_requested {
+    ($call:ident) => {
+        if let Some(result) = crate::call_failure(crate::Call::$call) {
+            return result;
+        }
+    };
+}
+pub(crate) use fail_if_requested;
 
 /// Makes the next `xrCreateSwapchain` call on the current thread return `result` without
 /// creating a swapchain. The failure is consumed by that call, so later calls succeed again.
@@ -388,7 +440,7 @@ pub unsafe extern "system" fn get_instance_proc_addr(
                     GetActionStateBoolean,
                     GetActionStateFloat,
                     GetActionStateVector2f,
-                    (GetActionStatePose),
+                    GetActionStatePose,
                     CreateActionSet,
                     DestroyActionSet,
                     CreateAction,
@@ -1150,6 +1202,7 @@ extern "system" fn create_action_space(
     info: *const xr::ActionSpaceCreateInfo,
     space: *mut xr::Space,
 ) -> xr::Result {
+    fail_if_requested!(CreateActionSpace);
     let session = get_handle!(session);
     let info = unsafe { info.as_ref() }.unwrap();
     let action = get_handle!(info.action);
@@ -1271,6 +1324,7 @@ extern "system" fn poll_event(
     instance: xr::Instance,
     buffer: *mut xr::EventDataBuffer,
 ) -> xr::Result {
+    fail_if_requested!(PollEvent);
     let instance = get_handle!(instance);
     let recv = instance.event_receiver.lock().unwrap();
     match recv.try_recv() {
@@ -1420,6 +1474,7 @@ extern "system" fn sync_actions(
     session_xr: xr::Session,
     info: *const xr::ActionsSyncInfo,
 ) -> xr::Result {
+    fail_if_requested!(SyncActions);
     let session = get_handle!(session_xr);
     for hand in [&session.left_hand, &session.right_hand] {
         if let Some(profile) = hand.pending_profile.load() {
@@ -1520,6 +1575,7 @@ extern "system" fn get_action_state_boolean(
     info: *const xr::ActionStateGetInfo,
     state: *mut xr::ActionStateBoolean,
 ) -> xr::Result {
+    fail_if_requested!(GetActionState);
     unsafe {
         state.write(xr::ActionStateBoolean {
             ty: xr::ActionStateBoolean::TYPE,
@@ -1558,6 +1614,7 @@ extern "system" fn get_action_state_float(
     info: *const xr::ActionStateGetInfo,
     state: *mut xr::ActionStateFloat,
 ) -> xr::Result {
+    fail_if_requested!(GetActionState);
     unsafe {
         state.write(xr::ActionStateFloat {
             ty: xr::ActionStateFloat::TYPE,
@@ -1592,6 +1649,7 @@ extern "system" fn get_action_state_vector2f(
     info: *const xr::ActionStateGetInfo,
     state: *mut xr::ActionStateVector2f,
 ) -> xr::Result {
+    fail_if_requested!(GetActionState);
     unsafe {
         state.write(xr::ActionStateVector2f {
             ty: xr::ActionStateFloat::TYPE,
@@ -1623,11 +1681,38 @@ extern "system" fn get_action_state_vector2f(
     xr::Result::SUCCESS
 }
 
+extern "system" fn get_action_state_pose(
+    session: xr::Session,
+    info: *const xr::ActionStateGetInfo,
+    state: *mut xr::ActionStatePose,
+) -> xr::Result {
+    fail_if_requested!(GetActionState);
+    let session = get_handle!(session);
+    let Some((_, action)) = session.get_action_if_attached(info) else {
+        return xr::Result::ERROR_ACTIONSET_NOT_ATTACHED;
+    };
+
+    let hand_state = action.get_hand_state(unsafe { (*info).subaction_path });
+    let ActionState::Pose(active) = hand_state.state else {
+        return xr::Result::ERROR_ACTION_TYPE_MISMATCH;
+    };
+    unsafe {
+        state.write(xr::ActionStatePose {
+            ty: xr::ActionStatePose::TYPE,
+            next: std::ptr::null_mut(),
+            is_active: active.into(),
+        });
+    }
+
+    xr::Result::SUCCESS
+}
+
 extern "system" fn get_current_interaction_profile(
     session: xr::Session,
     user_path: xr::Path,
     state: *mut xr::InteractionProfileState,
 ) -> xr::Result {
+    fail_if_requested!(GetCurrentInteractionProfile);
     let session = get_handle!(session);
     let Some(instance) = session.instance.upgrade() else {
         return xr::Result::ERROR_INSTANCE_LOST;
@@ -1658,6 +1743,7 @@ extern "system" fn locate_space(
     _time: xr::Time,
     location: *mut xr::SpaceLocation,
 ) -> xr::Result {
+    fail_if_requested!(LocateSpace);
     let base_space = get_handle!(base_space);
     assert!(
         !matches!(
@@ -1807,6 +1893,7 @@ extern "system" fn wait_swapchain_image(
     swapchain: xr::Swapchain,
     _info: *const xr::SwapchainImageWaitInfo,
 ) -> xr::Result {
+    fail_if_requested!(WaitSwapchainImage);
     let swapchain = get_handle!(swapchain);
     if !swapchain.image_acquired.load(Ordering::Relaxed) {
         return xr::Result::ERROR_CALL_ORDER_INVALID;
@@ -1818,6 +1905,7 @@ extern "system" fn release_swapchain_image(
     swapchain: xr::Swapchain,
     _info: *const xr::SwapchainImageReleaseInfo,
 ) -> xr::Result {
+    fail_if_requested!(ReleaseSwapchainImage);
     let swapchain = get_handle!(swapchain);
     if !swapchain.image_acquired.load(Ordering::Relaxed) {
         return xr::Result::ERROR_CALL_ORDER_INVALID;
@@ -1831,6 +1919,7 @@ extern "system" fn wait_frame(
     _info: *const xr::FrameWaitInfo,
     state: *mut xr::FrameState,
 ) -> xr::Result {
+    fail_if_requested!(WaitFrame);
     let session = get_handle!(session);
     if let Err(e) = transition_frame_state(&session.frame_state, FrameState::Waited) {
         return e;
@@ -1851,6 +1940,7 @@ extern "system" fn begin_frame(
     session: xr::Session,
     _info: *const xr::FrameBeginInfo,
 ) -> xr::Result {
+    fail_if_requested!(BeginFrame);
     let session = get_handle!(session);
     if let Err(e) = transition_frame_state(&session.frame_state, FrameState::Begun) {
         return e;
@@ -1859,6 +1949,7 @@ extern "system" fn begin_frame(
 }
 
 extern "system" fn end_frame(session: xr::Session, info: *const xr::FrameEndInfo) -> xr::Result {
+    fail_if_requested!(EndFrame);
     let session = get_handle!(session);
     if let Err(e) = transition_frame_state(&session.frame_state, FrameState::Ended) {
         return e;
@@ -1975,6 +2066,7 @@ extern "system" fn apply_haptic_feedback(
     action_info: *const xr::HapticActionInfo,
     haptic_feedback: *const xr::HapticBaseHeader,
 ) -> xr::Result {
+    fail_if_requested!(ApplyHapticFeedback);
     let session = get_handle!(session);
 
     const {
