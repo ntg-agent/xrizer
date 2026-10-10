@@ -319,10 +319,16 @@ impl vr::IVRCompositor029_Interface for Compositor {
     }
     fn GetLastPosePredictionIDs(
         &self,
-        _pRenderPosePredictionID: *mut u32,
-        _pGamePosePredictionID: *mut u32,
+        pRenderPosePredictionID: *mut u32,
+        pGamePosePredictionID: *mut u32,
     ) -> vr::EVRCompositorError {
         crate::warn_unimplemented!("GetLastPosePredictionIDs");
+        // Prediction IDs aren't tracked, and GetPosesForFrame ignores them.
+        for id in [pRenderPosePredictionID, pGamePosePredictionID] {
+            if let Some(id) = unsafe { id.as_mut() } {
+                *id = 0;
+            }
+        }
         vr::EVRCompositorError::None
     }
     fn GetCompositorBenchmarkResults(
@@ -2788,5 +2794,36 @@ mod tests {
             <Compositor as vr::IVRCompositor015On016>::GetCurrentScreenshotType(&f.comp),
             vr::EVRScreenshotType::None
         );
+    }
+
+    #[test]
+    fn last_pose_prediction_ids_are_written() {
+        use vr::IVRCompositor029_Interface as C29;
+        let f = Fixture::new();
+        let c = &*f.comp;
+
+        // GetPosesForFrame ignores the ID, so neutral IDs are consistent with it.
+        let (mut render, mut game) = (0xdead_beef, 0xdead_beef);
+        assert_eq!(
+            C29::GetLastPosePredictionIDs(c, &mut render, &mut game),
+            None
+        );
+        assert_eq!((render, game), (0, 0));
+
+        // Either output may be null.
+        render = 0xdead_beef;
+        assert_eq!(
+            C29::GetLastPosePredictionIDs(c, &mut render, std::ptr::null_mut()),
+            None
+        );
+        assert_eq!(render, 0);
+        game = 0xdead_beef;
+        assert_eq!(
+            C29::GetLastPosePredictionIDs(c, std::ptr::null_mut(), &mut game),
+            None
+        );
+        assert_eq!(game, 0);
+        let null = std::ptr::null_mut();
+        assert_eq!(C29::GetLastPosePredictionIDs(c, null, null), None);
     }
 }

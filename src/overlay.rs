@@ -1630,12 +1630,13 @@ impl vr::IVROverlay026On027 for OverlayMan {
     }
     fn GetOverlayTransformOverlayRelative(
         &self,
-        _: vr::VROverlayHandle_t,
+        handle: vr::VROverlayHandle_t,
         _: *mut vr::VROverlayHandle_t,
         _: *mut vr::HmdMatrix34_t,
     ) -> vr::EVROverlayError {
         crate::warn_unimplemented!("GetOverlayTransformOverlayRelative");
-        vr::EVROverlayError::None
+        get_overlay!(self, handle, _overlay);
+        vr::EVROverlayError::WrongTransformType
     }
 }
 
@@ -1726,12 +1727,15 @@ impl vr::IVROverlay021On024 for OverlayMan {
         _: vr::VROverlayHandle_t,
         value: *mut c_char,
         size: u32,
-        _: *mut vr::HmdColor_t,
+        color: *mut vr::HmdColor_t,
         error: *mut vr::EVROverlayError,
     ) -> u32 {
         crate::warn_unimplemented!("GetOverlayRenderModel (v1.8.19)");
         if !value.is_null() && size > 0 {
             unsafe { value.write(0) }
+        }
+        if let Some(color) = unsafe { color.as_mut() } {
+            *color = Default::default();
         }
         if let Some(error) = unsafe { error.as_mut() } {
             *error = vr::EVROverlayError::None;
@@ -1768,12 +1772,14 @@ impl vr::IVROverlay020On021 for OverlayMan {
     }
     fn GetOverlayAutoCurveDistanceRangeInMeters(
         &self,
-        _handle: vr::VROverlayHandle_t,
+        handle: vr::VROverlayHandle_t,
         _min_distance: *mut f32,
         _max_distance: *mut f32,
     ) -> vr::EVROverlayError {
         crate::warn_unimplemented!("GetOverlayAutoCurveDistanceRangeInMeters");
-        vr::EVROverlayError::None
+        // The range isn't stored, so there is nothing valid to report.
+        get_overlay!(self, handle, _overlay);
+        vr::EVROverlayError::RequestFailed
     }
     fn SetOverlayAutoCurveDistanceRangeInMeters(
         &self,
@@ -2075,6 +2081,22 @@ mod tests {
         check(wrong, &|h| {
             o.GetOverlayTransformTrackedDeviceRelative(h, null.cast(), null.cast())
         });
+        check(wrong, &|h| {
+            <OverlayMan as vr::IVROverlay026On027>::GetOverlayTransformOverlayRelative(
+                &o,
+                h,
+                null.cast(),
+                null.cast(),
+            )
+        });
+        check(E::RequestFailed, &|h| {
+            <OverlayMan as vr::IVROverlay020On021>::GetOverlayAutoCurveDistanceRangeInMeters(
+                &o,
+                h,
+                null.cast(),
+                null.cast(),
+            )
+        });
     }
 
     #[test]
@@ -2119,15 +2141,22 @@ mod tests {
         );
         assert_eq!(err, E::None);
         let (mut name, mut err) = ([1 as c_char; 2], E::RequestFailed);
+        let mut color = vr::HmdColor_t {
+            r: 0.5,
+            g: 0.5,
+            b: 0.5,
+            a: 0.5,
+        };
         let len = <OverlayMan as vr::IVROverlay021On024>::GetOverlayRenderModel(
             &o,
             h,
             name.as_mut_ptr(),
             2,
-            null.cast(),
+            &mut color,
             &mut err,
         );
         assert_eq!((len, name, err), (0, [0, 1], E::None));
+        assert_eq!([color.r, color.g, color.b, color.a], [0.0; 4]);
         let len = <OverlayMan as vr::IVROverlay021On024>::GetOverlayRenderModel(
             &o,
             h,
