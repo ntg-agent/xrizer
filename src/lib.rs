@@ -99,6 +99,15 @@ macro_rules! atomic_float {
 atomic_float!(AtomicF32, f32, AtomicU32);
 atomic_float!(AtomicF64, f64, AtomicU64);
 
+/// Borrows a C string argument of an interface method. `None` if the application passed null.
+///
+/// # Safety
+///
+/// `ptr` must be null or point to a nul-terminated string that is valid for `'a`.
+unsafe fn cstr_arg<'a>(ptr: *const c_char) -> Option<&'a CStr> {
+    (!ptr.is_null()).then(|| unsafe { CStr::from_ptr(ptr) })
+}
+
 /// Whether a panic was caused by the OpenXR runtime going away (e.g. the runtime was stopped or
 /// crashed). That is usually not xrizer's fault, so there's no point in showing the error dialog.
 fn is_runtime_lost(panic_message: &str) -> bool {
@@ -211,13 +220,18 @@ fn init_logging() {
 
 /// # Safety
 ///
-/// interface_name must be valid
+/// interface_name must be null or valid, return_code must be null or valid
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn VRClientCoreFactory(
     interface_name: *const c_char,
     return_code: *mut i32,
 ) -> *mut c_void {
-    let interface = unsafe { CStr::from_ptr(interface_name) };
+    let Some(interface) = (unsafe { cstr_arg(interface_name) }) else {
+        if let Some(return_code) = unsafe { return_code.as_mut() } {
+            *return_code = vr::EVRInitError::Init_InterfaceNotFound as i32;
+        }
+        return std::ptr::null_mut();
+    };
 
     struct ClientCorePtr(*mut c_void);
     // SAFETY: Vtables are fine to send across threads.
@@ -277,6 +291,18 @@ mod tests {
         // The return code is optional.
         let interface =
             unsafe { super::HmdSystemFactory(c"IVRSystem_009".as_ptr(), std::ptr::null_mut()) };
+        assert!(interface.is_null());
+    }
+
+    #[test]
+    fn client_core_factory_null_interface_name() {
+        let mut code = 0;
+        let interface = unsafe { super::VRClientCoreFactory(std::ptr::null(), &mut code) };
+        assert!(interface.is_null());
+        assert_eq!(code, openvr::EVRInitError::Init_InterfaceNotFound as i32);
+        // The return code is optional.
+        let interface =
+            unsafe { super::VRClientCoreFactory(std::ptr::null(), std::ptr::null_mut()) };
         assert!(interface.is_null());
     }
 

@@ -2038,3 +2038,80 @@ fn bindings_for_outputs_of_the_wrong_kind_are_skipped() {
         vr::EVRInputError::None
     );
 }
+
+#[test]
+fn handle_getters_null_arguments() {
+    use std::ffi::c_char;
+    use std::ptr::{null, null_mut};
+
+    let f = Fixture::new();
+    let name = c"/actions/set1".as_ptr();
+    type Getter<'a> = &'a dyn Fn(*const c_char, *mut u64) -> vr::EVRInputError;
+    let getters: [(&str, Getter); 3] = [
+        ("GetInputSourceHandle", &|n, h| {
+            f.input.GetInputSourceHandle(n, h)
+        }),
+        ("GetActionHandle", &|n, h| f.input.GetActionHandle(n, h)),
+        ("GetActionSetHandle", &|n, h| {
+            f.input.GetActionSetHandle(n, h)
+        }),
+    ];
+    let sizes = || {
+        (
+            f.input.input_source_map.read().unwrap().len(),
+            f.input.action_map.read().unwrap().len(),
+            f.input.set_map.read().unwrap().len(),
+        )
+    };
+
+    for (what, get) in getters {
+        let before = sizes();
+        let mut handle = 0;
+        for (name, out) in [
+            (null(), &mut handle as *mut u64),
+            (name, null_mut()),
+            (null(), null_mut()),
+        ] {
+            assert_eq!(get(name, out), vr::EVRInputError::InvalidParam, "{what}");
+        }
+        // nothing is written and nothing is created
+        assert_eq!(handle, 0, "{what}");
+        assert_eq!(sizes(), before, "{what}");
+
+        assert_eq!(get(name, &mut handle), vr::EVRInputError::None, "{what}");
+        assert_ne!(handle, 0, "{what}");
+        assert_ne!(sizes(), before, "{what}");
+    }
+}
+
+#[test]
+fn skeletal_null_out_pointers() {
+    use std::ptr::null_mut;
+
+    let mut f = Fixture::new();
+    f.load_actions(c"actions.json");
+    let skeleton = f.get_action_handle(c"/actions/set1/in/SkellyL");
+    let size = std::mem::size_of::<vr::InputSkeletalActionData_t>() as u32;
+
+    assert_eq!(
+        f.input.GetSkeletalActionData(skeleton, null_mut(), size),
+        vr::EVRInputError::InvalidParam
+    );
+
+    // The knuckles are always reported as partial, once there is a controller to ask.
+    let mut level = vr::EVRSkeletalTrackingLevel::Estimated;
+    assert_eq!(
+        f.input.GetSkeletalTrackingLevel(skeleton, null_mut()),
+        vr::EVRInputError::InvalidParam
+    );
+    f.set_interaction_profile::<Knuckles>(LeftHand);
+    for _ in 0..2 {
+        f.input.openxr.poll_events();
+        f.input.frame_start_update();
+    }
+    assert_eq!(
+        f.input.GetSkeletalTrackingLevel(skeleton, &mut level),
+        vr::EVRInputError::None
+    );
+    assert_eq!(level, vr::EVRSkeletalTrackingLevel::Partial);
+}

@@ -18,7 +18,7 @@ use skeletal::SkeletalInputActionData;
 use crate::input::devices::ProfileData;
 use crate::input::profiles::RunWithProfile;
 use crate::{
-    AtomicF32,
+    AtomicF32, cstr_arg,
     openxr_data::{self, Hand, OpenXrData, SessionData},
     tracy_span,
 };
@@ -618,6 +618,10 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         action: vr::VRActionHandle_t,
         level: *mut vr::EVRSkeletalTrackingLevel,
     ) -> vr::EVRInputError {
+        if level.is_null() {
+            return vr::EVRInputError::InvalidParam;
+        }
+
         get_action_from_handle!(self, action, data, action);
         let ActionData::Skeleton(hand) = action else {
             return vr::EVRInputError::WrongType;
@@ -769,6 +773,9 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         //    action_data_size as usize,
         //    std::mem::size_of::<vr::InputSkeletalActionData_t>()
         //);
+        if action_data.is_null() {
+            return vr::EVRInputError::InvalidParam;
+        }
 
         let data = self.openxr.session_data.get();
         let Some(loaded) = data.input_data.get_loaded_actions() else {
@@ -1247,7 +1254,10 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         input_source_path: *const c_char,
         handle: *mut vr::VRInputValueHandle_t,
     ) -> vr::EVRInputError {
-        let path = unsafe { CStr::from_ptr(input_source_path) };
+        let Some((path, handle)) = (unsafe { cstr_arg(input_source_path).zip(handle.as_mut()) })
+        else {
+            return vr::EVRInputError::InvalidParam;
+        };
 
         let ret = {
             let guard = self.input_source_map.read().unwrap();
@@ -1261,13 +1271,9 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
                 }
             }
         };
-        if let Some(handle) = unsafe { handle.as_mut() } {
-            debug!("requested handle for path {path:?}: {ret}");
-            *handle = ret;
-            vr::EVRInputError::None
-        } else {
-            vr::EVRInputError::InvalidParam
-        }
+        debug!("requested handle for path {path:?}: {ret}");
+        *handle = ret;
+        vr::EVRInputError::None
     }
 
     fn GetActionHandle(
@@ -1275,9 +1281,10 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         action_name: *const c_char,
         handle: *mut vr::VRActionHandle_t,
     ) -> vr::EVRInputError {
-        let name = unsafe { CStr::from_ptr(action_name) }
-            .to_string_lossy()
-            .to_lowercase();
+        let Some((name, handle)) = (unsafe { cstr_arg(action_name).zip(handle.as_mut()) }) else {
+            return vr::EVRInputError::InvalidParam;
+        };
+        let name = name.to_string_lossy().to_lowercase();
         let guard = self.action_map.read().unwrap();
         let val = match guard.iter().find(|(_, action)| action.path == name) {
             Some((key, _)) => key.data().as_ffi(),
@@ -1289,12 +1296,8 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             }
         };
 
-        if let Some(handle) = unsafe { handle.as_mut() } {
-            *handle = val;
-            vr::EVRInputError::None
-        } else {
-            vr::EVRInputError::InvalidParam
-        }
+        *handle = val;
+        vr::EVRInputError::None
     }
 
     fn GetActionSetHandle(
@@ -1302,9 +1305,11 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         action_set_name: *const c_char,
         handle: *mut vr::VRActionSetHandle_t,
     ) -> vr::EVRInputError {
-        let name = unsafe { CStr::from_ptr(action_set_name) }
-            .to_string_lossy()
-            .to_lowercase();
+        let Some((name, handle)) = (unsafe { cstr_arg(action_set_name).zip(handle.as_mut()) })
+        else {
+            return vr::EVRInputError::InvalidParam;
+        };
+        let name = name.to_string_lossy().to_lowercase();
         let guard = self.set_map.read().unwrap();
         let val = match guard.iter().find(|(_, set)| **set == name) {
             Some((key, _)) => key.data().as_ffi(),
@@ -1316,12 +1321,8 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             }
         };
 
-        if let Some(handle) = unsafe { handle.as_mut() } {
-            *handle = val;
-            vr::EVRInputError::None
-        } else {
-            vr::EVRInputError::InvalidParam
-        }
+        *handle = val;
+        vr::EVRInputError::None
     }
 
     fn SetActionManifestPath(&self, path: *const c_char) -> vr::EVRInputError {

@@ -2,6 +2,7 @@ use crate::{
     applications::Applications,
     chaperone::Chaperone,
     compositor::Compositor,
+    cstr_arg,
     input::Input,
     misc_unknown::UnknownInterfaces,
     openxr_data::{OpenXrData, RealOpenXrData},
@@ -220,7 +221,13 @@ impl IVRClientCore003_Interface for ClientCore {
         name_and_version: *const c_char,
         error: *mut vr::EVRInitError,
     ) -> *mut c_void {
-        let interface = unsafe { CStr::from_ptr(name_and_version) };
+        let Some(interface) = (unsafe { cstr_arg(name_and_version) }) else {
+            error!("Application requested an interface with a null name");
+            if !error.is_null() {
+                unsafe { *error = vr::EVRInitError::Init_InvalidInterface };
+            }
+            return std::ptr::null_mut();
+        };
         debug!("requested interface {interface:?}");
 
         if !error.is_null() {
@@ -279,7 +286,10 @@ impl IVRClientCore003_Interface for ClientCore {
             .into_boxed_slice()
         });
 
-        let interface = unsafe { CStr::from_ptr(interface_version) };
+        let Some(interface) = (unsafe { cstr_arg(interface_version) }) else {
+            warn!("app asked about an interface with a null name");
+            return vr::EVRInitError::Init_InvalidInterface;
+        };
         debug!("app asking about interface: {interface:?}");
         if KNOWN_INTERFACES.contains(&interface) {
             vr::EVRInitError::None
@@ -474,6 +484,32 @@ mod tests {
         let (interface, err) = get();
         assert!(interface.is_null());
         assert_eq!(err, vr::EVRInitError::Init_NotInitialized);
+    }
+
+    #[test]
+    fn null_interface_names() {
+        let core = ClientCore::new(c"IVRClientCore_003").unwrap();
+        let null = std::ptr::null();
+        let invalid = vr::EVRInitError::Init_InvalidInterface;
+        let check = || {
+            let mut err = vr::EVRInitError::None;
+            assert!(core.GetGenericInterface(null, &mut err).is_null());
+            assert_eq!(err, invalid);
+            // The error is optional.
+            assert!(
+                core.GetGenericInterface(null, std::ptr::null_mut())
+                    .is_null()
+            );
+            assert_eq!(core.IsInterfaceVersionValid(null), invalid);
+        };
+
+        check();
+        assert_eq!(
+            core.clone()
+                .Init(vr::EVRApplicationType::Scene, std::ptr::null()),
+            vr::EVRInitError::None
+        );
+        check();
     }
 
     #[test]

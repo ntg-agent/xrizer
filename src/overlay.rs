@@ -1,6 +1,7 @@
 use crate::{
     clientcore::{Injected, Injector},
     compositor::{Compositor, is_usable_swapchain},
+    cstr_arg,
     graphics_backends::{GraphicsBackend, SupportedBackend, supported_apis_enum},
     openxr_data::{GraphicalSession, OpenXrData, Session, SessionData},
 };
@@ -674,8 +675,9 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         name: *const c_char,
         handle: *mut vr::VROverlayHandle_t,
     ) -> vr::EVROverlayError {
-        let key = unsafe { CStr::from_ptr(key) };
-        let name = unsafe { CStr::from_ptr(name) };
+        let (Some(key), Some(name)) = (unsafe { cstr_arg(key) }, unsafe { cstr_arg(name) }) else {
+            return vr::EVROverlayError::InvalidParameter;
+        };
 
         if handle.is_null() {
             return vr::EVROverlayError::InvalidParameter;
@@ -718,7 +720,9 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         if handle.is_null() {
             return vr::EVROverlayError::InvalidParameter;
         }
-        let key = unsafe { CStr::from_ptr(key) };
+        let Some(key) = (unsafe { cstr_arg(key) }) else {
+            return vr::EVROverlayError::InvalidParameter;
+        };
         let map = self.key_to_overlay.read().unwrap();
         if let Some(key) = map.get(key) {
             unsafe {
@@ -1355,6 +1359,9 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         value: *mut f32,
     ) -> vr::EVROverlayError {
         get_overlay!(self, handle, overlay);
+        if value.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
         unsafe {
             *value = match overlay.kind {
                 OverlayKind::Curved { curvature } => curvature,
@@ -1387,6 +1394,9 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         value: *mut f32,
     ) -> vr::EVROverlayError {
         get_overlay!(self, handle, overlay);
+        if value.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
         unsafe {
             *value = overlay.width;
         }
@@ -1398,6 +1408,9 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         value: *mut u32,
     ) -> vr::EVROverlayError {
         get_overlay!(self, handle, overlay);
+        if value.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
         unsafe { *value = overlay.z_order as _ };
         vr::EVROverlayError::None
     }
@@ -1437,6 +1450,9 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         value: *mut f32,
     ) -> vr::EVROverlayError {
         get_overlay!(self, handle, overlay);
+        if value.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
         unsafe { *value = overlay.alpha.unwrap_or(1.0) };
         vr::EVROverlayError::None
     }
@@ -2285,6 +2301,50 @@ mod tests {
         let o = overlay_man();
         let h = create(&o, c"key");
         assert_eq!(o.SetOverlayPreCurvePitch(h, 0.5), E::None);
+    }
+
+    #[test]
+    fn create_and_find_overlay_null_arguments() {
+        let o = overlay_man();
+        let (key, name) = (c"key".as_ptr(), c"name".as_ptr());
+        let null = std::ptr::null();
+        let mut handle = vr::k_ulOverlayHandleInvalid;
+        let out: *mut vr::VROverlayHandle_t = &mut handle;
+
+        for (key, name, out) in [
+            (null, name, out),
+            (key, null, out),
+            (null, null, out),
+            (key, name, std::ptr::null_mut()),
+        ] {
+            assert_eq!(o.CreateOverlay(key, name, out), E::InvalidParameter);
+        }
+        assert_eq!(handle, vr::k_ulOverlayHandleInvalid);
+        assert!(o.overlays.read().unwrap().is_empty());
+        assert!(o.key_to_overlay.read().unwrap().is_empty());
+
+        let created = create(&o, c"key");
+        assert_eq!(o.FindOverlay(null, out), E::InvalidParameter);
+        assert_eq!(
+            o.FindOverlay(key, std::ptr::null_mut()),
+            E::InvalidParameter
+        );
+        assert_eq!(handle, vr::k_ulOverlayHandleInvalid);
+        assert_eq!(o.FindOverlay(key, out), E::None);
+        assert_eq!(handle, created);
+    }
+
+    #[test]
+    fn property_getters_null_output() {
+        let o = overlay_man();
+        let h = create(&o, c"key");
+        assert_eq!(o.SetOverlayWidthInMeters(h, 2.5), E::None);
+        assert_eq!(o.SetOverlaySortOrder(h, 3), E::None);
+
+        check_getter(h, 7.0, 0.0, |h, p| o.GetOverlayCurvature(h, p));
+        check_getter(h, 7.0, 2.5, |h, p| o.GetOverlayWidthInMeters(h, p));
+        check_getter(h, 7, 3, |h, p| o.GetOverlaySortOrder(h, p));
+        check_getter(h, 7.0, 1.0, |h, p| o.GetOverlayAlpha(h, p));
     }
 
     #[test]

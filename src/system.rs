@@ -282,6 +282,28 @@ mod view_cache_tests {
     }
 
     #[test]
+    fn projection_raw_outputs_are_optional() {
+        let system = system();
+        let eye = vr::EVREye::Left;
+
+        // Whichever output is missing, the others are written.
+        for missing in 0..4 {
+            let mut values = [9.0; 4];
+            let p = values.as_mut_ptr();
+            let mut ptrs = [p, p.wrapping_add(1), p.wrapping_add(2), p.wrapping_add(3)];
+            ptrs[missing] = std::ptr::null_mut();
+            system.GetProjectionRaw(eye, ptrs[0], ptrs[1], ptrs[2], ptrs[3]);
+
+            let mut expected = FAKEXR_PROJECTION;
+            expected[missing] = 9.0;
+            assert_projection(values, expected);
+        }
+
+        let null = std::ptr::null_mut();
+        system.GetProjectionRaw(eye, null, null, null, null);
+    }
+
+    #[test]
     fn locate_views_failure_without_previous_views_uses_defaults() {
         let system = system();
 
@@ -431,11 +453,15 @@ impl vr::IVRSystem026_Interface for System {
         let view = self.get_views(ty).views[eye as usize];
 
         // Top and bottom are flipped, for some reason
-        unsafe {
-            *left = view.fov.angle_left.tan();
-            *right = view.fov.angle_right.tan();
-            *bottom = view.fov.angle_up.tan();
-            *top = view.fov.angle_down.tan();
+        for (out, angle) in [
+            (left, view.fov.angle_left),
+            (right, view.fov.angle_right),
+            (bottom, view.fov.angle_up),
+            (top, view.fov.angle_down),
+        ] {
+            if let Some(out) = unsafe { out.as_mut() } {
+                *out = angle.tan();
+            }
         }
     }
     fn ComputeDistortion(
@@ -1109,6 +1135,9 @@ impl vr::IVRSystem026_Interface for System {
             log::error!("Unsupported texture type: {texture_type:?}");
             return;
         }
+        if device.is_null() {
+            return;
+        }
 
         unsafe {
             *device = self
@@ -1315,6 +1344,18 @@ mod tests {
         assert_eq!(buf[0], 0);
         assert_eq!(get(std::ptr::null_mut(), 4), 0);
         assert_eq!(get(std::ptr::null_mut(), 0), 0);
+    }
+
+    #[test]
+    fn output_device_null_pointer() {
+        let system = System::new(
+            Arc::new(OpenXrData::new(&Injector::default()).unwrap()),
+            &Injector::default(),
+        );
+        let texture_type = vr::ETextureType::Vulkan;
+        let (null, null_instance) = (std::ptr::null_mut(), std::ptr::null_mut());
+        vr::IVRSystem026_Interface::GetOutputDevice(&system, null, texture_type, null_instance);
+        <System as vr::IVRSystem016On017>::GetOutputDevice(&system, null, texture_type);
     }
 
     #[test]

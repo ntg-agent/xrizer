@@ -1,6 +1,7 @@
 // The interfaces in this file are missing in openvr.h and any other form of OpenVR documentation,
 // but are used by games (typically Half Life Alyx.)
 
+use crate::cstr_arg;
 use log::debug;
 use openvr::InterfaceImpl;
 use seq_macro::seq;
@@ -98,9 +99,11 @@ struct MailboxHandle(u64);
 gen_vtable! {
     struct Mailbox {
         fn undoc1(a: *const c_char, b: *mut MailboxHandle) -> c_int {
-            let a = unsafe { CStr::from_ptr(a) };
+            let a = unsafe { cstr_arg(a) };
             debug!(target: UNKNOWN_TAG, "Entered IVRMailbox::undoc1 with arguments a: {a:?}, b: {b:?}");
-            unsafe { *b = MailboxHandle(24) };
+            if let Some(b) = unsafe { b.as_mut() } {
+                *b = MailboxHandle(24);
+            }
             0
         }
         fn undoc2(handle: MailboxHandle) -> c_int {
@@ -136,14 +139,18 @@ gen_vtable! {
 
             static RECEIVED_MESSAGE: AtomicBool = AtomicBool::new(false);
             if !RECEIVED_MESSAGE.load(Ordering::Relaxed) {
-                RECEIVED_MESSAGE.store(true, Ordering::Relaxed);
-
                 let msg = cr#"{"type": "ready"}"#;
                 let msg_len = msg.count_bytes() as u32 + 1;
                 if let Some(len) = unsafe { len.as_mut() } {
                     *len = msg_len;
                 }
 
+                // Without a buffer there is nowhere to put the message, so it is not consumed.
+                if out_buf.is_null() {
+                    return 2;
+                }
+
+                RECEIVED_MESSAGE.store(true, Ordering::Relaxed);
                 if out_len < msg_len {
                     return 2;
                 }
@@ -182,7 +189,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mailbox_ready_message_without_length() {
+    fn mailbox_null_arguments() {
+        let this = std::ptr::null_mut();
+        let name = c"name".as_ptr();
+
+        // Both arguments of undoc1 are optional as far as we are concerned.
+        let mut handle = MailboxHandle(0);
+        assert_eq!(Mailbox::undoc1(this, std::ptr::null(), &mut handle), 0);
+        assert_eq!(handle.0, 24);
+        handle.0 = 0;
+        assert_eq!(Mailbox::undoc1(this, name, std::ptr::null_mut()), 0);
+        assert_eq!(handle.0, 0);
+        assert_eq!(Mailbox::undoc1(this, name, &mut handle), 0);
+        assert_eq!(handle.0, 24);
+    }
+
+    #[test]
+    fn mailbox_ready_message() {
         let mut buf = [0x55 as c_char; 32];
         let mut read = |len: *mut u32| {
             Mailbox::undoc4(
@@ -194,12 +217,29 @@ mod tests {
             )
         };
 
-        // The length is optional. This is the first read, so it gets the message.
+        // Without a buffer there is nowhere to put the message: it is reported as too small, and
+        // not consumed.
+        let mut len = 0;
+        let read_null_buf = |len: *mut u32| {
+            Mailbox::undoc4(
+                std::ptr::null_mut(),
+                MailboxHandle(1),
+                std::ptr::null_mut(),
+                32,
+                len,
+            )
+        };
+        assert_eq!(read_null_buf(&mut len), 2);
+        assert_eq!(len as usize, cr#"{"type": "ready"}"#.count_bytes() + 1);
+        assert_eq!(read_null_buf(std::ptr::null_mut()), 2);
+
+        // The length is optional. This is the first read with a buffer, so it gets the message.
         assert_eq!(read(std::ptr::null_mut()), 0);
         // The message is only delivered once.
         let mut len = 0;
         assert_eq!(read(&mut len), 1);
         assert_eq!(len, 0);
+        assert_eq!(read_null_buf(&mut len), 1);
 
         let message = unsafe { CStr::from_ptr(buf.as_ptr()) };
         assert_eq!(message, cr#"{"type": "ready"}"#);
