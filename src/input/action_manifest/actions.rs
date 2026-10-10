@@ -44,6 +44,10 @@ pub enum ControllerType {
     /// Bindings for the HMD itself, i.e., /user/head/proximity. There's no OpenXR interaction
     /// profile for it.
     GenericHmd,
+    // Also used for the Samsung Odyssey controllers, which SteamVR reports as holographic controllers.
+    HolographicController,
+    #[serde(rename = "hpmotioncontroller")]
+    HPMotionController,
     #[serde(untagged)]
     Unknown(String),
 }
