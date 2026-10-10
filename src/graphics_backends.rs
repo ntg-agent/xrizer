@@ -120,7 +120,8 @@ impl SupportedBackend {
     pub fn new(texture: &vr::Texture_t, _bounds: vr::VRTextureBounds_t) -> Option<Self> {
         match texture.eType {
             vr::ETextureType::Vulkan => {
-                let vk_texture = unsafe { &*(texture.handle as *const vr::VRVulkanTextureData_t) };
+                let vk_texture =
+                    unsafe { (texture.handle as *const vr::VRVulkanTextureData_t).as_ref() }?;
                 Some(Self::Vulkan(VulkanData::new(vk_texture)))
             }
             vr::ETextureType::OpenGL => GlData::new().map(Self::OpenGL),
@@ -128,7 +129,10 @@ impl SupportedBackend {
             vr::ETextureType::Reserved => Some(Self::Fake(
                 crate::compositor::FakeGraphicsData::new(texture),
             )),
-            other => panic!("Unsupported texture type: {other:?}"),
+            other => {
+                log::warn!("Unsupported texture type: {other:?}");
+                None
+            }
         }
     }
 }
