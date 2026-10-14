@@ -61,6 +61,9 @@
 					"inputs": {
 						"click": {
 							"output": "/actions/set1/in/boolact"
+						},
+						"long": {
+							"output": "/actions/set1/in/boolact4"
 						}
 					},
 					"mode": "button",

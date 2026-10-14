@@ -7,7 +7,7 @@ use openxr as xr;
 use std::f32::consts::{FRAC_PI_4, PI};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use xr::{Haptic, HapticVibration};
 
 mod marker {
@@ -780,6 +780,84 @@ impl BoolCustomBinding for DoubleTapData {
     }
 }
 
+/// A button held down for at least [`Self::DELAY`]. Like SteamVR's long press, it turns on once
+/// the button has been held that long and stays on until the button is released.
+pub(super) struct LongPressData {
+    /// When the button was pressed, while it is held.
+    pressed_at: Mutex<Option<Instant>>,
+    active: AtomicBool,
+}
+
+impl LongPressData {
+    pub(super) const DELAY: Duration = Duration::from_millis(500);
+}
+
+impl BoolCustomBinding for LongPressData {
+    type ExtraActions<M: ActionsMarker> = Action<bool, M>;
+    type BindingParams = ();
+
+    fn extra_action_names(cleaned_action_name: &str) -> Self::ExtraActions<Names> {
+        format!("{cleaned_action_name}_long")
+    }
+
+    fn get_actions(
+        extra_actions: &mut ExtraActionData,
+    ) -> Option<&mut Option<Self::ExtraActions<Actions>>> {
+        Some(&mut extra_actions.long_action)
+    }
+
+    fn create_actions(
+        action_name: &Self::ExtraActions<Names>,
+        action_set: &xr::ActionSet,
+        subaction_paths: &[xr::Path],
+    ) -> Self::ExtraActions<Actions> {
+        action_set
+            .create_action(
+                action_name,
+                &format!("{action_name} (long)"),
+                subaction_paths,
+            )
+            .unwrap()
+    }
+
+    fn create_binding_data(_: Option<&Self::BindingParams>) -> BoolBindingType {
+        BoolBindingType::LongPress(LongPressData {
+            pressed_at: Mutex::new(None),
+            active: false.into(),
+        })
+    }
+
+    fn state(
+        &self,
+        action: &Self::ExtraActions<Actions>,
+        session: &xr::Session<xr::AnyGraphics>,
+        subaction_path: xr::Path,
+    ) -> xr::Result<Option<xr::ActionState<bool>>> {
+        let state = action.state(session, subaction_path)?;
+        if !state.is_active {
+            return Ok(None);
+        }
+
+        let mut pressed_at = self.pressed_at.lock().unwrap();
+        let current_state = if state.current_state {
+            // The press time is when we first see the button down, not the OpenXR change time:
+            // that is in the runtime's clock, and we compare against the time now.
+            let pressed_at = *pressed_at.get_or_insert_with(Instant::now);
+            pressed_at.elapsed() >= Self::DELAY
+        } else {
+            *pressed_at = None;
+            false
+        };
+
+        let was_active = self.active.swap(current_state, Ordering::Relaxed);
+        Ok(Some(xr::ActionState {
+            current_state,
+            changed_since_last_sync: current_state != was_active,
+            ..state
+        }))
+    }
+}
+
 enum BindingState {
     Unsynced,
     Synced(Option<xr::ActionState<bool>>),
@@ -807,6 +885,7 @@ pub enum BoolBindingType {
     // This can include actions where behavior is customized via OXR extensions
     Dpad(DpadData),
     DoubleTap(DoubleTapData),
+    LongPress(LongPressData),
     Toggle(ToggleData),
     Grab(GrabBindingData),
     ThresholdFloat(ThresholdBindingFloat),
@@ -859,6 +938,9 @@ impl BoolBindingData {
             }
             BoolBindingType::DoubleTap(double) => {
                 get_state!(double, double_action)
+            }
+            BoolBindingType::LongPress(long) => {
+                get_state!(long, long_action)
             }
         }?;
 
@@ -1753,6 +1835,85 @@ mod tests {
         set_action_late(true);
         f.sync(active_set);
         f.verify_bool_state(boolact, active_state.set_changed());
+    }
+
+    macro_rules! get_long_action {
+        ($fixture:expr, $handle:expr, $long_data:ident) => {
+            let input = $fixture.input.clone();
+            let data = input.openxr.session_data.get();
+            let actions = data.input_data.get_loaded_actions().unwrap();
+            let ExtraActionData { long_action, .. } = actions.try_get_extra($handle).unwrap();
+
+            let $long_data = long_action.as_ref().unwrap();
+        };
+    }
+
+    #[test]
+    fn long_press() {
+        let mut f = Fixture::new();
+        let set1 = f.get_action_set_handle(c"/actions/set1");
+        let active_set = vr::VRActiveActionSet_t {
+            ulActionSet: set1,
+            ..Default::default()
+        };
+        let boolact = f.get_action_handle(c"/actions/set1/in/boolact4");
+        f.load_actions(c"actions.json");
+        get_long_action!(f, boolact, long_action);
+        let set_action = |state: bool| {
+            fakexr::set_action_state(
+                long_action.as_raw(),
+                fakexr::ActionState::Bool(state),
+                LeftHand,
+            );
+        };
+
+        f.set_interaction_profile::<Knuckles>(LeftHand);
+        set_action(false);
+        f.sync(active_set);
+        let inactive_state = BoolState::default().set_active();
+        f.verify_bool_state(boolact, inactive_state);
+
+        // A short press does nothing.
+        set_action(true);
+        f.sync(active_set);
+        f.verify_bool_state(boolact, inactive_state);
+        set_action(false);
+        f.sync(active_set);
+        f.verify_bool_state(boolact, inactive_state);
+
+        // Held: off until the delay has passed, then on until released.
+        set_action(true);
+        f.sync(active_set);
+        f.verify_bool_state(boolact, inactive_state);
+        std::thread::sleep(LongPressData::DELAY);
+        f.sync(active_set);
+        let active_state = inactive_state.set_state();
+        f.verify_bool_state(boolact, active_state.set_changed());
+        f.sync(active_set);
+        f.verify_bool_state(boolact, active_state);
+
+        set_action(false);
+        f.sync(active_set);
+        f.verify_bool_state(boolact, inactive_state.set_changed());
+        f.sync(active_set);
+        f.verify_bool_state(boolact, inactive_state);
+
+        // The delay starts again with the next press.
+        set_action(true);
+        f.sync(active_set);
+        f.verify_bool_state(boolact, inactive_state);
+    }
+
+    #[test]
+    fn long_press_bindings() {
+        let f = Fixture::new();
+        f.load_actions(c"actions.json");
+        f.verify_extra_bindings(
+            Knuckles::profile_path(),
+            c"/actions/set1/in/boolact4",
+            ExtraActionType::Long,
+            ["/user/hand/left/input/b/click".to_string()],
+        );
     }
 
     #[test]
