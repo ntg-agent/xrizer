@@ -5,8 +5,7 @@ use super::ms_motion_controller::HolographicController;
 use crate::input::legacy::LegacyBindings;
 use crate::input::profiles::{MainAxisType, Property, wmr};
 use crate::openxr_data::Hand;
-use glam::Mat4;
-use glam::Vec3;
+use glam::{Mat4, Quat, Vec3};
 
 pub struct SamsungOdysseyController;
 
@@ -56,11 +55,19 @@ impl InteractionProfile for SamsungOdysseyController {
         HolographicController::skeletal_input_bindings(&InputToXrPath::new(c.instance))
     }
 
-    fn offset_grip_pose(_hand: Hand) -> Mat4 {
-        Mat4::from_translation(Vec3::new(
-            // From the models found here https://www.microsoft.com/en-us/download/details.aspx?id=56414
-            0.0, 0.079738, -0.035449,
-        ))
+    fn offset_grip_pose(hand: Hand) -> Mat4 {
+        // Up and forward from the models found here
+        // https://www.microsoft.com/en-us/download/details.aspx?id=56414, plus 5 cm towards the
+        // other hand and 10 degrees of yaw outward, tuned in Half-Life: Alyx on an Odyssey+ with
+        // Monado: without those, hands held together are drawn 20 - 25 cm apart.
+        let (x, yaw) = match hand {
+            Hand::Left => (0.05, 10.0_f32),
+            Hand::Right => (-0.05, -10.0_f32),
+        };
+        Mat4::from_rotation_translation(
+            Quat::from_rotation_y(yaw.to_radians()),
+            Vec3::new(x, 0.079738, -0.035449),
+        )
     }
 }
 
