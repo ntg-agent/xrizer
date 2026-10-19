@@ -76,6 +76,7 @@ pub enum ExtraActionType {
     DpadDirection,
     ToggleAction,
     Double,
+    Long,
 }
 
 impl Fixture {
@@ -291,6 +292,7 @@ impl Fixture {
             ExtraActionType::DpadDirection => extras.vector2_action.as_ref()?.as_raw(),
             ExtraActionType::ToggleAction => extras.toggle_action.as_ref()?.as_raw(),
             ExtraActionType::Double => extras.double_action.as_ref()?.as_raw(),
+            ExtraActionType::Long => extras.long_action.as_ref()?.as_raw(),
         })
     }
 

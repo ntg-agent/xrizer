@@ -318,6 +318,7 @@ struct ExtraActionData {
     toggle_action: Option<xr::Action<bool>>,
     analog_action: Option<xr::Action<f32>>,
     double_action: Option<xr::Action<bool>>,
+    long_action: Option<xr::Action<bool>>,
     vector2_action: Option<xr::Action<xr::Vector2f>>,
     grab_actions: Option<GrabActions<custom_bindings::Actions>>,
     /// The action is bound to /user/head/proximity. There's no OpenXR input path for that, so it's

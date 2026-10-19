@@ -26,6 +26,11 @@
 			"type": "boolean"
 		},
 		{
+			"name": "/actions/set1/in/BoolAct4",
+			"requirement": "optional",
+			"type": "boolean"
+		},
+		{
 			"name": "/actions/set1/in/Vec1Act",
 			"requirement": "optional",
 			"type": "vector1"

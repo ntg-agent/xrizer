@@ -12,7 +12,7 @@ use crate::{
         GrabActions,
         custom_bindings::{
             DoubleTapData, DpadActions, DpadBindingParams, DpadData, GrabBindingData,
-            ThresholdBindingFloat, ThresholdBindingVector2, ToggleData,
+            LongPressData, ThresholdBindingFloat, ThresholdBindingVector2, ToggleData,
         },
     },
     openxr_data::Hand,
@@ -292,6 +292,7 @@ struct ButtonInput {
     /// Click can be overridden to use a different path via the `force_input` parameter.
     click: Option<ActionBindingOutput<paths::Click>>,
     double: Option<ActionBindingOutput<Custom>>,
+    long: Option<ActionBindingOutput<Custom>>,
 }
 
 #[derive(Deserialize)]
@@ -654,6 +655,7 @@ pub fn handle_sources(
                             touch,
                             click,
                             double,
+                            long,
                         },
                     parameters,
                 }) = data.validate_path()
@@ -675,6 +677,28 @@ pub fn handle_sources(
                 {
                     let name = context.add_custom_binding::<DoubleTapData>(
                         &double.output,
+                        complete_path.hand,
+                        action_set_name,
+                        action_set,
+                        None,
+                    );
+
+                    context.push_binding(
+                        name,
+                        context
+                            .instance
+                            .string_to_path(&complete_path.to_string())
+                            .unwrap(),
+                    );
+                }
+
+                if let Some(long) = long
+                    && let Ok(complete_path) = validate_path(click_path)
+                        .ok_or_else(|| InvalidActionPath(click_path, &long.output.path))
+                        .inspect_err(InvalidActionPath::warn)
+                {
+                    let name = context.add_custom_binding::<LongPressData>(
+                        &long.output,
                         complete_path.hand,
                         action_set_name,
                         action_set,
